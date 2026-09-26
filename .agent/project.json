@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "initialized": false,
+  "project_name": "",
+  "stacks": [],
+  "branch": {
+    "prefix": "feature",
+    "max_slug_length": 48
+  },
+  "milestones": {
+    "enabled": false,
+    "version_source": "auto"
+  },
+  "hooks": {
+    "branch_switch": [],
+    "verify_quick": [],
+    "verify_final": [
+      "python scripts/agent/agent_tool.py validate-docs"
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+name: Feature / Change
+description: Repository-changing feature or behavior request
+title: ""
+labels:
+  - "phase:requirements"
+body:
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: What problem or opportunity motivates this change?
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What outcome should be achieved?
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Known constraints / non-goals
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Initial acceptance criteria
+      description: Observable outcomes. These may be refined in requirements phase.
