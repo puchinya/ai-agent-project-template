@@ -6,40 +6,39 @@ Read while the Issue is in `phase:ready` or `phase:implementation`.
 
 Before editing:
 
-1. Re-read the approved Issue and relevant spec/design.
+1. Re-read the approved Issue and its linked specification/design owners.
 2. Confirm no newer decision supersedes them.
-3. If an Implementation Contract was supplied, save/verify its exact local mirror.
+3. If an Implementation Contract was supplied, save and verify its exact local mirror.
 4. Run `prepare-self-review.* <issue>`.
 5. For source changes, run `start-feature-branch.* <issue> <short-description>`.
 6. Replace `phase:ready` with `phase:implementation`.
-7. Confirm upstream spec/design updates are approved.
+7. Confirm upstream specification/design updates are approved.
 
 ## Implementation rules
 
-- Stay inside approved scope.
-- Do not mix unrelated cleanup.
-- Do not change a spec to match a bug.
-- Do not invent material API/architecture decisions in code.
+- Stay inside approved scope and implement against the approved semantic owner documents.
+- Do not mix unrelated cleanup or change a specification to make a bug appear conformant.
+- Do not invent material API/architecture decisions in code. Return to requirements/design if a material contract or architecture requirement is missing or contradicted.
 - Add/update tests for behavior and high-risk design invariants.
-- Keep documentation responsibilities synchronized.
-- If a material contract/architecture requirement is missing or contradicted, return to requirements/design.
+- Keep documentation responsibilities synchronized. Maintain clickable references when documents move or split.
+- Keep task chronology and actual run results out of durable specifications/designs; put them in Issue/PR or status/evidence.
 
 ## Verification
 
-During iteration:
+During iteration, run the configured `verify_quick` hook from the [project profile](../../docs/agents/project.md):
 
 ```text
 run-hook.* verify_quick
 ```
 
-When stable:
+When stable, run the configured `verify_final` hook and [document validation](../../scripts/agent/README.md):
 
 ```text
 run-hook.* verify_final
 validate-docs.*
 ```
 
-Project hooks are defined by `.agent/project.json`.
+Project hooks are defined by `.agent/project.json`. Record actual results against the verified HEAD in the appropriate evidence location.
 
 ## Self-review
 
@@ -60,11 +59,11 @@ Any new commit makes the prior self-review stale.
 Before reporting implementation complete:
 
 - changes committed;
-- configured final verification passed;
+- configured final verification passed or an exact self-hosting limitation and direct equivalent are recorded;
 - docs validation passed;
 - self-review validation passed;
 - branch pushed;
 - PR exists with `Closes #<issue>`;
 - Issue moved to `phase:review`.
 
-Then enter `review.md`.
+Then enter the [review workflow](review.md).

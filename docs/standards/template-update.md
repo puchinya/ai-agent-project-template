@@ -41,6 +41,20 @@ For an existing project that did not start from this template:
 
 `--adopt` records existing matching files as the current baseline and copies missing managed files. Conflicting files are left untouched and accompanied by `.incoming-template` files for manual merge.
 
+## Documentation schema migration during template update
+
+The source template manifest owns `documentation_schema_version`. The field is a requirement of the adopted template, not a project-specific setting; do not move it into `.agent/project.json`.
+
+When the source manifest requires schema 2, the downstream repository must migrate all durable specification and design documents to schema 2 within the same template-update Issue/PR. Project-specific specifications, designs, and status documents remain non-managed and are never automatically rewritten by the updater.
+
+`update-template --check` makes no changes. It reports the required schema, migration count, and each `MIGRATION_REQUIRED <path>`. Exit code `2` means there is a managed-file conflict. Otherwise, exit code `3` means project documents still need migration; exit code `0` means neither condition remains.
+
+Apply mode retains the three-way safe managed-file update. It may apply managed files and write template state, then report outstanding project-document migrations and return `3`. This is intentional. Managed conflicts retain precedence and return `2`; if both conditions exist, both are reported. The updater never modifies project-specific durable documents.
+
+After exit code `3`, read the new specification and design standards, review each listed document semantically, preserve one owner per rule, remove history from durable docs, add a human-readable Overview, cover relevant failure/lifecycle/quality topics, update ownership indexes, and fix navigational Markdown links. Do not blindly add headings or split files based only on size. Rerun the updater and require exit code `0`, then run `validate-docs`, the configured final verification, self-review, and the PR review workflow. A template-update PR is incomplete while migrations remain.
+
+A source manifest with no `documentation_schema_version` is treated as schema 1 for backward compatibility. Values other than supported integer versions are errors.
+
 ## Updating after the template improves
 
 ```bash
@@ -50,7 +64,7 @@ git checkout -b chore/update-agent-template
 ./scripts/agent/run-hook.sh verify_final
 ```
 
-Then inspect conflicts, commit, and open a PR.
+If the updater returns `3`, complete the semantic document migration in this same Issue/PR and rerun the updater. Then inspect conflicts, commit, and open a PR.
 
 ## Rule
 

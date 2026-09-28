@@ -14,12 +14,13 @@ import tempfile
 import unicodedata
 from datetime import datetime
 from typing import Any
+from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / ".agent" / "project.json"
 STATE = ROOT / ".agent-state" / "issues"
-SPEC_REQUIRED = [
+SPEC_REQUIRED_V1 = [
     "Purpose",
     "Scope",
     "Terminology",
@@ -29,7 +30,7 @@ SPEC_REQUIRED = [
     "Compatibility and versioning",
     "Acceptance traceability",
 ]
-DESIGN_REQUIRED = [
+DESIGN_REQUIRED_V1 = [
     "Context and goals",
     "Requirements traceability",
     "Architecture overview",
@@ -43,6 +44,40 @@ DESIGN_REQUIRED = [
     "Alternatives considered",
     "Risks and open follow-ups",
 ]
+SPEC_REQUIRED_V2 = [
+    "Overview",
+    "Purpose",
+    "Scope",
+    "Terminology",
+    "Semantic ownership",
+    "Normative requirements",
+    "Observable behavior",
+    "Error and boundary behavior",
+    "Quality attributes",
+    "Compatibility and versioning",
+    "Acceptance traceability",
+]
+DESIGN_REQUIRED_V2 = [
+    "Overview",
+    "Context and goals",
+    "Requirements traceability",
+    "Architecture overview",
+    "Architecture invariants",
+    "Component responsibilities",
+    "Data and control flow",
+    "Ownership and lifecycle",
+    "Error handling and recovery",
+    "Concurrency and async model",
+    "Quality attributes and operations",
+    "Compatibility and migration",
+    "Verification strategy",
+    "Alternatives considered",
+    "Risks and open follow-ups",
+]
+DOCUMENTATION_SCHEMA_VERSIONS = {1, 2}
+DOCUMENTATION_SCHEMA_MARKER = "agent-doc-schema"
+DOCUMENTATION_SCHEMA_2_MARKER = "<!-- agent-doc-schema: 2 -->"
+DOCUMENTATION_SIZE_WARNING_BYTES = 50 * 1024
 CANONICAL_BEGIN = "AGENT_REVIEWER_CHECKLIST_V1_BEGIN"
 CANONICAL_END = "AGENT_REVIEWER_CHECKLIST_V1_END"
 
@@ -671,36 +706,163 @@ def cmd_resume(args: argparse.Namespace) -> None:
     print("\n--- CURRENT CONTEXT ---")
     cmd_context(args)
 
+def markdown_without_fences(text: str) -> str:
+    kept: list[str] = []
+    fence_char: str | None = None
+    fence_size = 0
+    for line in text.splitlines():
+        match = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if match:
+            fence = match.group(1)
+            if fence_char is None:
+                fence_char, fence_size = fence[0], len(fence)
+            elif fence[0] == fence_char and len(fence) >= fence_size:
+                fence_char, fence_size = None, 0
+            continue
+        if fence_char is None:
+            kept.append(line)
+    return "\n".join(kept)
+
+
 def markdown_headings(text: str) -> set[str]:
     heads = set()
-    fenced = False
-    for line in text.splitlines():
-        if re.match(r"^\s*(```|~~~)", line):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
-        m = re.match(r"^##\s+(.+?)\s*#*\s*$", line)
-        if m:
-            heads.add(m.group(1).strip())
+    for line in markdown_without_fences(text).splitlines():
+        match = re.match(r"^##\s+(.+?)\s*#*\s*$", line)
+        if match:
+            heads.add(match.group(1).strip())
     return heads
 
-def validate_doc(path: Path, doc_type: str) -> list[str]:
+
+def parse_document_schema(text: str, path: Path) -> tuple[int, list[str]]:
+    body = markdown_without_fences(text)
+    matches = [
+        (line_number, line)
+        for line_number, line in enumerate(body.splitlines(), start=1)
+        if DOCUMENTATION_SCHEMA_MARKER in line
+    ]
+    label = str(path.relative_to(ROOT))
+    if not matches:
+        return 1, []
+    if len(matches) > 1:
+        return 1, [f"{label}: duplicate {DOCUMENTATION_SCHEMA_MARKER} markers"]
+    line_number, line = matches[0]
+    if line == DOCUMENTATION_SCHEMA_2_MARKER:
+        return 2, []
+    marker = re.fullmatch(r"<!-- agent-doc-schema: (-?\d+) -->", line)
+    if marker:
+        return 1, [f"{label}:{line_number}: unsupported documentation schema '{marker.group(1)}'"]
+    return 1, [f"{label}:{line_number}: malformed {DOCUMENTATION_SCHEMA_MARKER} marker"]
+
+
+def read_documentation_schema(manifest_path: Path) -> tuple[int, list[str]]:
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return 1, [f"{manifest_path}: invalid template manifest: {exc}"]
+    version = manifest.get("documentation_schema_version", 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version not in DOCUMENTATION_SCHEMA_VERSIONS:
+        return 1, [
+            f"{manifest_path}: documentation_schema_version must be one of "
+            f"{sorted(DOCUMENTATION_SCHEMA_VERSIONS)}, got {version!r}"
+        ]
+    return version, []
+
+
+def markdown_link_targets(text: str) -> list[str]:
+    body = markdown_without_fences(text)
+    references: dict[str, str] = {}
+    definition = re.compile(r"^\s{0,3}\[([^\]]+)\]:\s*(?:<([^>]+)>|(\S+))", re.MULTILINE)
+    for match in definition.finditer(body):
+        references[match.group(1).strip().casefold()] = match.group(2) or match.group(3)
+    body = definition.sub("", body)
+    targets: list[str] = []
+    inline = re.compile(r"(?<!!)\[[^\]]+\]\(\s*(?:<([^>]+)>|([^\s)]+))")
+    for match in inline.finditer(body):
+        targets.append(match.group(1) or match.group(2))
+    reference = re.compile(r"(?<!!)\[[^\]]+\]\[([^\]]+)\]")
+    for match in reference.finditer(body):
+        target = references.get(match.group(1).strip().casefold())
+        if target:
+            targets.append(target)
+    return targets
+
+
+def local_markdown_target(source: Path, target: str) -> Path | None:
+    parts = urlsplit(target.strip())
+    if parts.scheme.casefold() in {"http", "https", "mailto"} or not parts.path:
+        return None
+    path_text = unquote(parts.path)
+    if Path(path_text).suffix.casefold() != ".md":
+        return None
+    return (source.parent / path_text).resolve()
+
+
+def validate_markdown_links(path: Path, text: str) -> list[str]:
+    errors: list[str] = []
+    for target in markdown_link_targets(text):
+        resolved = local_markdown_target(path, target)
+        if resolved is not None and not resolved.is_file():
+            errors.append(f"{path.relative_to(ROOT)}: broken local Markdown link '{target}'")
+    return errors
+
+
+def validate_doc(path: Path, doc_type: str, required_schema: int = 1) -> list[str]:
     text = path.read_text(encoding="utf-8")
-    required = SPEC_REQUIRED if doc_type == "specification" else DESIGN_REQUIRED
+    errors: list[str] = []
+    schema, schema_errors = parse_document_schema(text, path)
+    errors.extend(schema_errors)
+    if required_schema == 2 and schema != 2:
+        errors.append(f"{path.relative_to(ROOT)}: requires {DOCUMENTATION_SCHEMA_2_MARKER}")
+    if doc_type == "specification":
+        required = SPEC_REQUIRED_V2 if schema == 2 else SPEC_REQUIRED_V1
+    else:
+        required = DESIGN_REQUIRED_V2 if schema == 2 else DESIGN_REQUIRED_V1
     headings = markdown_headings(text)
-    return [f"{path.relative_to(ROOT)}: missing section '## {h}'" for h in required if h not in headings]
+    errors.extend(
+        f"{path.relative_to(ROOT)}: missing section '## {heading}'"
+        for heading in required if heading not in headings
+    )
+    if schema == 2:
+        errors.extend(validate_markdown_links(path, text))
+    return errors
+
+
+def documentation_warnings(path: Path, text: str, doc_type: str, schema: int) -> list[str]:
+    if schema != 2:
+        return []
+    label = str(path.relative_to(ROOT))
+    warnings: list[str] = []
+    if len(text.encode("utf-8")) > DOCUMENTATION_SIZE_WARNING_BYTES:
+        warnings.append(
+            f"{label}: exceeds 50 KiB; review semantic ownership; size alone does not require splitting"
+        )
+    base = ROOT / "docs" / ("specs" if doc_type == "specification" else "design")
+    linked = False
+    for index in sorted(base.rglob("README.md")) if base.exists() else []:
+        for target in markdown_link_targets(index.read_text(encoding="utf-8")):
+            resolved = local_markdown_target(index, target)
+            if resolved == path.resolve():
+                linked = True
+                break
+        if linked:
+            break
+    if not linked:
+        warnings.append(f"{label}: add a link from a README ownership index under {base.relative_to(ROOT)}")
+    return warnings
 
 def cmd_validate_docs(args: argparse.Namespace) -> None:
     errors: list[str] = []
+    warnings: list[str] = []
     checked = 0
+    required_schema, schema_errors = read_documentation_schema(TEMPLATE_FILES)
+    errors.extend(schema_errors)
     for base, marker, typ in [
         (ROOT / "docs" / "specs", "<!-- agent-doc-type: specification -->", "specification"),
         (ROOT / "docs" / "design", "<!-- agent-doc-type: design -->", "design"),
     ]:
         if not base.exists():
             continue
-        for path in base.rglob("*.md"):
+        for path in sorted(base.rglob("*.md")):
             if path.name.lower() == "readme.md":
                 continue
             text = path.read_text(encoding="utf-8")
@@ -708,11 +870,17 @@ def cmd_validate_docs(args: argparse.Namespace) -> None:
                 errors.append(f"{path.relative_to(ROOT)}: missing required marker {marker}")
                 continue
             checked += 1
-            errors.extend(validate_doc(path, typ))
+            doc_errors = validate_doc(path, typ, required_schema)
+            errors.extend(doc_errors)
+            schema, _ = parse_document_schema(text, path)
+            if schema == 2:
+                warnings.extend(documentation_warnings(path, text, typ, schema))
     if errors:
         print("\n".join("error: " + x for x in errors), file=sys.stderr)
         raise SystemExit(1)
-    print(f"docs_validation=pass checked={checked}")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    print(f"docs_validation=pass checked={checked} warnings={len(warnings)} required_schema={required_schema}")
 
 
 def cmd_new_doc(args: argparse.Namespace) -> None:
@@ -766,6 +934,26 @@ def load_template_manifest(source_root: Path) -> dict[str, Any]:
     return data
 
 
+def documentation_migrations(required_schema: int) -> list[str]:
+    if required_schema < 2:
+        return []
+    migrations: list[str] = []
+    for base, marker, doc_type in [
+        (ROOT / "docs" / "specs", "<!-- agent-doc-type: specification -->", "specification"),
+        (ROOT / "docs" / "design", "<!-- agent-doc-type: design -->", "design"),
+    ]:
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*.md")):
+            if path.name.casefold() == "readme.md":
+                continue
+            text = path.read_text(encoding="utf-8")
+            invalid = marker not in text or bool(validate_doc(path, doc_type, required_schema))
+            if invalid:
+                migrations.append(str(path.relative_to(ROOT)))
+    return sorted(set(migrations))
+
+
 def read_template_state() -> dict[str, Any]:
     if not TEMPLATE_STATE.exists():
         return {"schema_version": 1, "template_id": "ai-agent-project-template", "files": {}}
@@ -795,6 +983,11 @@ def cmd_update_template(args: argparse.Namespace) -> None:
     if not source_root.is_dir():
         fail(f"template source does not exist: {source_root}")
     manifest = load_template_manifest(source_root)
+    source_schema, source_schema_errors = read_documentation_schema(
+        source_root / ".agent" / "template-files.json"
+    )
+    if source_schema_errors:
+        fail("\n".join(source_schema_errors))
     state = read_template_state()
     state["schema_version"] = 1
     state["template_id"] = manifest.get("template_id", "ai-agent-project-template")
@@ -864,10 +1057,17 @@ def cmd_update_template(args: argparse.Namespace) -> None:
     print(f"unchanged={len(unchanged)}")
     print(f"adopted={len(adopted)}")
     print(f"conflicts={len(conflicts)}")
+    migrations = documentation_migrations(source_schema)
+    print(f"documentation_schema_required={source_schema}")
+    print(f"documentation_migration_required={len(migrations)}")
+    for item in migrations:
+        print(f"MIGRATION_REQUIRED {item}")
     for item in conflicts:
         print(f"CONFLICT {item}")
     if conflicts:
         raise SystemExit(2)
+    if migrations:
+        raise SystemExit(3)
 
 
 def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
@@ -891,6 +1091,7 @@ def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
         "schema_version": 1,
         "template_id": "ai-agent-project-template",
         "template_version": args.version,
+        "documentation_schema_version": 2,
         "files": managed,
     }
     TEMPLATE_FILES.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -964,7 +1165,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_update_template)
 
     s = sub.add_parser("refresh-template-manifest")
-    s.add_argument("--version", default="0.1.0")
+    s.add_argument("--version", default="0.4.0")
     s.set_defaults(func=cmd_refresh_template_manifest)
 
     s = sub.add_parser("validate-docs")

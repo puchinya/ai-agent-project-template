@@ -45,3 +45,25 @@ Literal `\n` in GitHub bodies caused broken Issues/PRs. This template requires b
 ## Technology-specific policy belongs in the project profile
 
 Rules like Rust `cargo clean` are valuable in some repositories and harmful in others. This template moves such behavior to `.agent/project.json` hooks.
+
+## Semantic ownership beats catch-all documents
+
+One durable rule has one semantic owner. Split documents when ownership and change boundaries differ, not just because a file is large. Ownership indexes let readers find the right document without repeating its rules.
+
+## Durable documents describe current state
+
+Specifications and designs explain current required behavior and architecture. Completed Issue history, superseded workarounds, implementation transcripts, and one-off verification results belong in Issue/PR history or evidence.
+
+## Code inventories are not architecture
+
+Paths and symbols can identify an ownership boundary, architectural seam, required order, or canonical invariant. An exhaustive inventory of files and functions does not explain system boundaries or responsibilities.
+
+## A human Overview can coexist with a rigorous contract
+
+Progressive disclosure starts with a concise Overview of the consumer or architecture mental model, guarantees, limitations, and related owners. Detailed normative requirements and design invariants remain precise and authoritative.
+
+## Template updates surface migrations without overwriting project documents
+
+A newer template can raise the required documentation schema. The updater reports which project-specific documents need semantic migration, while preserving them for review. The migration belongs to the same downstream template-update Issue/PR; it is not a blind rewrite command.
+
+See the [specification standard](specification.md), [design standard](design.md), [documentation synchronization standard](documentation-sync.md), and [template update standard](template-update.md).

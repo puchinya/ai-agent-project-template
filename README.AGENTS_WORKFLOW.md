@@ -185,18 +185,26 @@ Issueには少なくとも以下を整理します。
 - Unresolved questions
 - Document impact
 
-公開・観測可能な契約が変わる場合は `docs/specs/` の更新が必要です。
+Document impactはspecification、design、status/evidenceごとに、既存ownerの更新、新しい文書の正確な将来パス、または不要とする具体的理由を記録します。既存ownerはMarkdownリンクで示します。
+
+公開・観測可能な契約が変わる場合は対応する[specification owner](docs/specs/README.md)を更新します。
 
 ### Design phase
 
 要求承認後、`phase:design` へ進みます。
 
-新しい機能やdurable architecture変更では、Issueのメモだけで終わらせず、必要に応じて以下を更新します。
+新しい機能やdurable architecture変更では、Issueのメモだけで終わらせず、Document Architecture Gateを通します。
 
-- `docs/specs/...` — 外から見える契約
-- `docs/design/...` — 内部構造・責務・データフロー・ライフサイクル等
+- 変更するobservable ruleにはspecification ownerを一つ定める。
+- durable architecture decisionにはdesign ownerを一つ定める。
+- 新しい文書や分割した文書は[specification index](docs/specs/README.md)または[design index](docs/design/README.md)からリンクする。
+- task-only decisionはIssue/PR、実装詳細はcode/tests、実際の進捗や検証結果はstatus/evidenceに置く。
+- navigational Markdown referencesはクリック可能にする。
+- schema-2の品質topicは適用するか、具体的な理由とともにN/Aとする。
 
-仕様書は `docs/templates/spec-template.md`、設計書は `docs/templates/design-template.md` を起点にします。
+1つの文書が不要な場合は、requirements/IssueのDocument impactに理由を残します。新規の非自明な機能では通常specificationとdesignの両方を検討します。
+
+仕様書は[specification template](docs/templates/spec-template.md)、設計書は[design template](docs/templates/design-template.md)を起点にし、[specification standard](docs/standards/specification.md)と[design standard](docs/standards/design.md)に従います。
 
 新規文書は helper から作成できます。ファイル名はエディタのタブでも種類を判別しやすいよう `-spec.md`, `-design.md`, `-status.md` 接尾辞になります。
 
@@ -345,9 +353,13 @@ Node.js では `npm test`, `npm run lint`, `npm run typecheck` など、.NETで�
 
 自動検出は初期値を作るだけです。プロジェクトの正しいCIゲートに合わせて調整してください。
 
-## 9. 仕様書と設計書を「ちゃんと」維持する
+## 9. 仕様書と設計書を維持する
 
 仕様書と設計書を同じ内容の言い換えにしないことが重要です。
+
+schema 2ではOverviewから詳細へ読み進められるようにし、一つのdurable ruleにつきsemantic ownerを一つにします。documentは現在の要求・architectureを記述し、完了したIssue/PRの経緯や単発の検証結果は残しません。文書分割はsemantic ownershipと変更境界で決め、50 KiBはreview warningであって分割条件ではありません。
+
+文書間を案内するMarkdown referencesはクリック可能にし、broken relative `.md` targetを修正します。大きなrepositoryではnested ownership indexesを使えます。
 
 仕様書:
 
@@ -369,7 +381,9 @@ Node.js では `npm test`, `npm run lint`, `npm run typecheck` など、.NETで�
 - test strategy
 - alternatives considered / rejected
 
-具体的な品質基準は `docs/standards/` にあります。
+仕様書ではsecurity/privacy、performance/scalability、user-facing behaviorのaccessibility/usability、compatibility/versioning、portability/platform behaviorを検討します。設計書ではfailure/recovery、ownership/lifecycle/cleanup、cancellation/reentrancy/repeated calls、security、resource/performance、observability/supportability、compatibility/migration、platform/backend differencesを検討します。適用しないtopicは具体的な理由付きでN/Aとします。
+
+詳しい基準は[Specification standard](docs/standards/specification.md)、[Design standard](docs/standards/design.md)、[Documentation synchronization standard](docs/standards/documentation-sync.md)にあります。
 
 ## 10. 最小の日常コマンド
 
@@ -423,6 +437,10 @@ git checkout -b chore/update-agent-template
 ./scripts/agent/validate-docs.sh
 ./scripts/agent/run-hook.sh verify_final
 ```
+
+template manifestの `documentation_schema_version` が上がると、`update-template` はschemaが古いdurable spec/design文書を `MIGRATION_REQUIRED` として列挙し、終了コード `3` を返します。終了コード `2` はmanaged-file conflictです。終了コード `3` の場合も安全なmanaged-file更新は適用済みで、template-stateは記録されています。
+
+Project-specific specs/design/statusはmanaged filesではなく、updaterは書き換えません。対象文書を人が意味的にschema 2へ移行し、ownership indexとリンクを直してから、同じtemplate-update Issue/PR内でupdaterを再実行します。終了コード `0`、`validate-docs`、project final verification、self-review、review phaseまで終わる前にtemplate-update PRを完了扱いにしません。自動の見出し挿入や機械的な意味移行は行いません。
 
 衝突が出た場合:
 
