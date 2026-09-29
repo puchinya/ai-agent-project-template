@@ -2,7 +2,7 @@
 
 Read while the associated PR is open or the Issue is in `phase:review`.
 
-The Issue/specification remains the approved behavior. Design remains the approved durable architecture. The PR describes actual delta and evidence.
+The Issue and its semantic specification owners remain the approved behavior. Design remains the approved durable architecture. The PR describes actual delta and evidence.
 
 ## PR structure
 
@@ -17,6 +17,20 @@ Closes #<issue>
 ```
 
 Do not duplicate the full Issue/spec/design/Implementation Contract.
+
+## Documentation review
+
+Check that:
+
+- specification and design responsibilities remain separate;
+- each durable rule has one semantic owner and other documents link to it;
+- durable documents describe current state rather than Issue/PR/test chronology;
+- the human-readable Overview agrees with the detailed contract/architecture;
+- relevant commercial-quality topics are covered or explicitly N/A with a concrete reason;
+- cross-document navigation is clickable and valid;
+- no material decision is hidden in code and no duplicate normative/design owner was introduced.
+
+If a material requirement/design gap is found, return to `phase:design`.
 
 ## Review handling
 
@@ -34,8 +48,6 @@ After repository-changing remediation:
 4. refresh and redo self-review on the new HEAD;
 5. rerun final verification when required;
 6. rerun docs validation.
-
-If review requires a material requirement/design change, return to `phase:design`.
 
 ## Completion
 

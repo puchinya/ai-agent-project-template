@@ -9,8 +9,9 @@ elwindui の agent workflow の考え方をベースにしつつ、Rust 固有�
 - `AGENTS.md` を全AIエージェント共通の正本にする。
 - リポジトリ変更タスクは GitHub Issue と紐付けてから詳細調査・編集へ進む。
 - フェーズを `requirements -> design -> ready -> implementation -> review` で管理する。
-- 永続文書の責務を `specs -> design -> code -> status` に分離する。
+- 永続文書を人とAIの両方が使えるよう、specification / design / code-and-tests / status-evidence の責務を分ける。
 - 仕様書は「何を保証するか」、設計書は「どう実現するか」を記述する。
+- 仕様書・設計書は短いOverviewから詳細へ進め、各ルールの意味上のownerを一つにする。
 - コードを正として、仕様書・設計書を実装後に後付けしない。
 - Issueごとの一時状態は `.agent-state/issues/<issue>/` に保存してGit管理しない。
 - 技術依存処理は `.agent/project.json` の hooks へ集約する。
@@ -60,6 +61,8 @@ gh auth login
 
 ## Documentation model
 
+Schema 2 gives specifications and designs a human-readable Overview, explicit semantic ownership, current-state-only content, and prompts for relevant commercial-quality concerns. Large files trigger a review warning at 50 KiB; size alone does not require a split.
+
 ```text
 docs/specs/   normative public / observable contract
       |
@@ -75,15 +78,15 @@ docs/status/  concise current state / gaps / verification state
 
 仕様書・設計書の品質基準:
 
-- `docs/standards/specification.md`
-- `docs/standards/design.md`
-- `docs/standards/documentation-sync.md`
+- [Specification standard](docs/standards/specification.md)
+- [Design standard](docs/standards/design.md)
+- [Documentation synchronization standard](docs/standards/documentation-sync.md)
 
 雛形:
 
-- `docs/templates/spec-template.md`
-- `docs/templates/design-template.md`
-- `docs/templates/status-template.md`
+- [Specification template](docs/templates/spec-template.md)
+- [Design template](docs/templates/design-template.md)
+- [Status template](docs/templates/status-template.md)
 
 テンプレート準拠文書は次で検証できます。
 
@@ -110,7 +113,9 @@ docs/status/  concise current state / gaps / verification state
 ./scripts/agent/update-template.sh --source ../ai-agent-project-template --adopt
 ```
 
-詳細は `docs/standards/template-update.md` を参照してください。
+テンプレートmanifestの `documentation_schema_version` は、適用先の durable specification / design に必要なschemaを示します。更新でmigrationが必要になると、`update-template` は終了コード `3` と対象ファイル一覧を返します。文書は自動書き換えせず、同じtemplate-update Issue/PRで意味を保って移行します。
+
+詳細は [Template update standard](docs/standards/template-update.md) を参照してください。
 
 ## Presentation
 
