@@ -43,7 +43,7 @@ For an existing project that did not start from this template:
 
 ## Documentation schema migration during template update
 
-The stable observable CLI contract for `validate-docs` and `update-template`, including report fields and exit codes, is owned by the [Agent Tooling Specification](../specs/agent-tooling-spec.md).
+The stable observable CLI contract for `validate-docs` and `update-template`, including report fields and exit codes, is owned by the [Agent Tooling Specification](../specs/agent-tooling-spec.md). This shared specification is explicitly template-managed so projects receive the contract linked here; other project-specific specifications and designs remain unmanaged.
 
 The source template manifest owns `documentation_schema_version`. The field is a requirement of the adopted template, not a project-specific setting; do not move it into `.agent/project.json`.
 

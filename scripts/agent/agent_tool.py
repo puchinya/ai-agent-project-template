@@ -1078,6 +1078,7 @@ def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "standards").glob("*.md")]
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "templates").glob("*.md")]
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
+    candidates += ["docs/specs/agent-tooling-spec.md"]
     # Presentation is included as template documentation, but project teams may replace it intentionally.
     candidates += ["docs/presentations/README.md", "docs/presentations/ai-agent-project-template-introduction.pptx"]
     for rel in sorted(set(candidates)):

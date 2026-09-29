@@ -3,7 +3,7 @@
 # Agent Tooling Specification
 
 - Status: Approved
-- Owning Issue: #1
+- Template source: [ai-agent-project-template Issue #1](https://github.com/puchinya/ai-agent-project-template/issues/1)
 - Related design: N/A — this contract does not introduce a durable architecture change.
 
 ## Overview
@@ -20,6 +20,7 @@ Guarantee consistent, locally observable behavior for `validate-docs` and `updat
 
 - Required documentation schema interpretation by `validate-docs` and `update-template`.
 - Validation results, migration report fields, command exit codes, and project-specific document preservation.
+- Template distribution of this shared specification as the single explicitly managed specification under `docs/specs/`.
 
 ### Out of scope
 

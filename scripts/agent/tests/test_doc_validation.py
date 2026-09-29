@@ -278,13 +278,26 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertFalse(set(module.DESIGN_REQUIRED_V2) - module.markdown_headings(design_text))
 
     def test_manifest_refresh_defaults_to_040_and_schema2(self):
-        for directory in ("docs/agent-workflow", "docs/standards", "docs/templates", "scripts/agent", ".agent"):
+        for directory in (
+            "docs/agent-workflow", "docs/standards", "docs/templates", "docs/specs",
+            "docs/design", "scripts/agent", ".agent",
+        ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
+        write_doc(self.root, "docs/specs/agent-tooling-spec.md", "shared contract\n")
+        write_doc(self.root, "docs/specs/product-feature-spec.md", "project spec\n")
+        write_doc(self.root, "docs/design/product-feature-design.md", "project design\n")
+        write_doc(self.root, "docs/specs/README.md", "spec index\n")
+        write_doc(self.root, "docs/design/README.md", "design index\n")
         args = Namespace(version=module.build_parser().parse_args(["refresh-template-manifest"]).version)
         module.cmd_refresh_template_manifest(args)
         data = json.loads(module.TEMPLATE_FILES.read_text(encoding="utf-8"))
         self.assertEqual(data["template_version"], "0.4.0")
         self.assertEqual(data["documentation_schema_version"], 2)
+        self.assertIn("docs/specs/agent-tooling-spec.md", data["files"])
+        self.assertNotIn("docs/specs/product-feature-spec.md", data["files"])
+        self.assertNotIn("docs/design/product-feature-design.md", data["files"])
+        self.assertNotIn("docs/specs/README.md", data["files"])
+        self.assertNotIn("docs/design/README.md", data["files"])
 
     def updater_fixture(self, required_schema=2, doc_schema=1, *, state=True):
         source, destination = self.root / "source", self.root / "destination"
@@ -307,6 +320,98 @@ class DocumentationSchemaTests(unittest.TestCase):
     def run_update(self, source, destination, state_path, *, check=True):
         with patch.object(module, "ROOT", destination), patch.object(module, "TEMPLATE_STATE", state_path):
             return module.cmd_update_template(Namespace(source=str(source), check=check, adopt=False))
+
+    def shared_spec_update_fixture(self, *, previous_shared=None, local_shared=None):
+        source, destination = self.root / "shared-source", self.root / "shared-destination"
+        shared_path = "docs/specs/agent-tooling-spec.md"
+        standard_path = "docs/standards/template-update.md"
+        source_spec = (ROOT / shared_path).read_bytes()
+        source_standard = (ROOT / standard_path).read_bytes()
+        (source / ".agent").mkdir(parents=True, exist_ok=True)
+        write_doc(source, shared_path, source_spec.decode("utf-8"))
+        write_doc(source, standard_path, source_standard.decode("utf-8"))
+        manifest = {
+            "schema_version": 1,
+            "template_id": "ai-agent-project-template",
+            "template_version": "0.4.0",
+            "documentation_schema_version": 2,
+            "files": [shared_path, standard_path],
+        }
+        (source / ".agent/template-files.json").write_text(json.dumps(manifest), encoding="utf-8")
+        project_spec = document("specification", 2, extra="Project-owned content.\n")
+        project_design = document("design", 2, extra="Project-owned content.\n")
+        project_spec_path = write_doc(destination, "docs/specs/product-feature-spec.md", project_spec)
+        project_design_path = write_doc(destination, "docs/design/product-feature-design.md", project_design)
+        if local_shared is not None:
+            write_doc(destination, shared_path, local_shared.decode("utf-8"))
+        state_path = destination / ".agent/template-state.json"
+        state_files = {}
+        if previous_shared is not None:
+            state_files[shared_path] = {
+                "source_sha256": hashlib.sha256(previous_shared).hexdigest(),
+            }
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({"files": state_files}), encoding="utf-8")
+        return {
+            "source": source,
+            "destination": destination,
+            "state": state_path,
+            "shared_path": shared_path,
+            "standard_path": standard_path,
+            "source_spec": source_spec,
+            "source_standard": source_standard,
+            "project_spec_path": project_spec_path,
+            "project_spec": project_spec.encode("utf-8"),
+            "project_design_path": project_design_path,
+            "project_design": project_design.encode("utf-8"),
+        }
+
+    def test_update_copies_shared_spec_and_preserves_project_specific_documents(self):
+        fixture = self.shared_spec_update_fixture()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.run_update(fixture["source"], fixture["destination"], fixture["state"], check=False)
+        shared = fixture["destination"] / fixture["shared_path"]
+        standard = fixture["destination"] / fixture["standard_path"]
+        self.assertEqual(shared.read_bytes(), fixture["source_spec"])
+        self.assertEqual(standard.read_bytes(), fixture["source_standard"])
+        self.assertEqual(fixture["project_spec_path"].read_bytes(), fixture["project_spec"])
+        self.assertEqual(fixture["project_design_path"].read_bytes(), fixture["project_design"])
+        target = module.local_markdown_target(standard, "../specs/agent-tooling-spec.md")
+        self.assertEqual(target, shared.resolve())
+        self.assertTrue(target.is_file())
+        self.assertIn("applied=2", stdout.getvalue().splitlines())
+        state_files = json.loads(fixture["state"].read_text(encoding="utf-8"))["files"]
+        self.assertEqual(set(state_files), {fixture["shared_path"], fixture["standard_path"]})
+        unchanged_stdout = io.StringIO()
+        with contextlib.redirect_stdout(unchanged_stdout):
+            self.run_update(fixture["source"], fixture["destination"], fixture["state"], check=False)
+        self.assertIn("unchanged=2", unchanged_stdout.getvalue().splitlines())
+        self.assertIn("applied=0", unchanged_stdout.getvalue().splitlines())
+
+    def test_update_conflicts_on_modified_shared_spec_and_preserves_project_documents(self):
+        previous_shared = (ROOT / "docs/specs/agent-tooling-spec.md").read_bytes()
+        previous_shared += b"\nPrevious template wording.\n"
+        local_shared = previous_shared + b"\nLocal clarification.\n"
+        fixture = self.shared_spec_update_fixture(
+            previous_shared=previous_shared,
+            local_shared=local_shared,
+        )
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(stdout):
+            self.run_update(fixture["source"], fixture["destination"], fixture["state"], check=False)
+        self.assertEqual(exc.exception.code, 2)
+        lines = stdout.getvalue().splitlines()
+        self.assertIn(f"CONFLICT {fixture['shared_path']}", lines)
+        shared = fixture["destination"] / fixture["shared_path"]
+        incoming = shared.with_name(shared.name + ".incoming-template")
+        standard = fixture["destination"] / fixture["standard_path"]
+        self.assertEqual(shared.read_bytes(), local_shared)
+        self.assertEqual(incoming.read_bytes(), fixture["source_spec"])
+        self.assertEqual(standard.read_bytes(), fixture["source_standard"])
+        self.assertEqual(fixture["project_spec_path"].read_bytes(), fixture["project_spec"])
+        self.assertEqual(fixture["project_design_path"].read_bytes(), fixture["project_design"])
+        self.assertTrue(module.local_markdown_target(standard, "../specs/agent-tooling-spec.md").is_file())
 
     def test_update_check_reports_migration_without_writes(self):
         source, destination, state = self.updater_fixture()
