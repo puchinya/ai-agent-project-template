@@ -70,6 +70,15 @@ class DocumentationSchemaTests(unittest.TestCase):
             result = call()
         return result, stdout.getvalue(), stderr.getvalue()
 
+    def capture_exit(self, call):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                call()
+            except SystemExit as exc:
+                return exc.code, stdout.getvalue(), stderr.getvalue()
+        return 0, stdout.getvalue(), stderr.getvalue()
+
     def test_v1_documents_remain_valid_under_v1_manifest(self):
         write_doc(self.root, "docs/specs/item.md", document("specification", 1))
         write_doc(self.root, "docs/design/item.md", document("design", None))
@@ -118,6 +127,57 @@ class DocumentationSchemaTests(unittest.TestCase):
                 )
                 errors = module.validate_doc(path, doc_type, 2)
                 self.assertTrue(any(f"missing section '## {heading}'" in error for error in errors))
+
+    def test_schema2_missing_heading_is_not_migration_and_fails_validate_docs(self):
+        self.set_manifest(2)
+        path = write_doc(
+            self.root, "docs/specs/item.md", document("specification", 2, omit="Purpose")
+        )
+        self.assertEqual(module.documentation_migrations(2), [])
+        code, _, stderr = self.capture_exit(lambda: module.cmd_validate_docs(Namespace()))
+        self.assertEqual(code, 1)
+        self.assertIn(f"{path.relative_to(self.root)}: missing section '## Purpose'", stderr)
+
+    def test_schema2_broken_link_is_not_migration_and_fails_validate_docs(self):
+        self.set_manifest(2)
+        path = write_doc(
+            self.root, "docs/specs/item.md",
+            document("specification", 2, extra="[Missing](missing.md)\n"),
+        )
+        self.assertEqual(module.documentation_migrations(2), [])
+        code, _, stderr = self.capture_exit(lambda: module.cmd_validate_docs(Namespace()))
+        self.assertEqual(code, 1)
+        self.assertIn("broken local Markdown link 'missing.md'", stderr)
+
+    def test_schema1_document_is_migration_when_schema2_is_required(self):
+        explicit_schema = write_doc(
+            self.root, "docs/specs/item.md", document("specification", 1)
+        )
+        missing_marker = write_doc(
+            self.root, "docs/design/legacy-design.md", document("design", None)
+        )
+        self.assertEqual(module.documentation_migrations(2), [
+            str(missing_marker.relative_to(self.root)),
+            str(explicit_schema.relative_to(self.root)),
+        ])
+
+    def test_invalid_schema_markers_are_not_migrations_and_fail_validate_docs(self):
+        self.set_manifest(2)
+        cases = [
+            ("<!-- agent-doc-schema two -->", "malformed"),
+            ("<!-- agent-doc-schema: 2 -->\n<!-- agent-doc-schema: 2 -->", "duplicate"),
+            ("<!-- agent-doc-schema: 9 -->", "unsupported"),
+        ]
+        for index, (marker, expected_error) in enumerate(cases):
+            with self.subTest(expected_error=expected_error):
+                write_doc(
+                    self.root, f"docs/specs/item-{index}-spec.md",
+                    document("specification", None).replace("# Example", marker + "\n# Example"),
+                )
+                self.assertEqual(module.documentation_migrations(2), [])
+                code, _, stderr = self.capture_exit(lambda: module.cmd_validate_docs(Namespace()))
+                self.assertEqual(code, 1)
+                self.assertIn(expected_error, stderr)
 
     def test_bad_document_markers_are_rejected(self):
         cases = [
@@ -193,6 +253,24 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertIn("<!-- agent-doc-schema: 2 -->", generated)
         self.assertIn("Owning Issue: #42", generated)
 
+    def test_new_doc_design_uses_schema2_and_nonbroken_related_spec_placeholder(self):
+        source_template = (ROOT / "docs/templates/design-template.md").read_text(encoding="utf-8")
+        write_doc(self.root, "docs/templates/design-template.md", source_template)
+        _, output, _ = self.capture(
+            lambda: module.cmd_new_doc(
+                Namespace(kind="design", slug="sample", title="Sample", issue=42)
+            )
+        )
+        generated_path = self.root / "docs/design/sample-design.md"
+        generated = generated_path.read_text(encoding="utf-8")
+        self.assertIn("docs/design/sample-design.md", output)
+        self.assertIn("<!-- agent-doc-schema: 2 -->", generated)
+        self.assertFalse(set(module.DESIGN_REQUIRED_V2) - module.markdown_headings(generated))
+        for target in module.markdown_link_targets(generated):
+            resolved = module.local_markdown_target(generated_path, target)
+            self.assertTrue(resolved is None or resolved.is_file(), target)
+        self.assertNotIn("TBD", module.markdown_link_targets(generated))
+
     def test_templates_match_v2_heading_contract(self):
         spec_text = (ROOT / "docs/templates/spec-template.md").read_text(encoding="utf-8")
         design_text = (ROOT / "docs/templates/design-template.md").read_text(encoding="utf-8")
@@ -233,21 +311,59 @@ class DocumentationSchemaTests(unittest.TestCase):
     def test_update_check_reports_migration_without_writes(self):
         source, destination, state = self.updater_fixture()
         before_state = state.read_bytes()
-        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(io.StringIO()):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(stdout):
             self.run_update(source, destination, state)
         self.assertEqual(exc.exception.code, 3)
+        self.assert_migration_report(stdout.getvalue(), ["docs/specs/item.md"])
         self.assertEqual((destination / "managed.md").read_text(encoding="utf-8"), "old template content\n")
         self.assertEqual(state.read_bytes(), before_state)
 
     def test_update_apply_reports_migration_without_rewriting_project_docs(self):
         source, destination, state = self.updater_fixture()
         before_doc = (destination / "docs/specs/item.md").read_bytes()
-        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(io.StringIO()):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(stdout):
             self.run_update(source, destination, state, check=False)
         self.assertEqual(exc.exception.code, 3)
+        self.assert_migration_report(stdout.getvalue(), ["docs/specs/item.md"])
         self.assertEqual((destination / "managed.md").read_text(encoding="utf-8"), "new template content\n")
         self.assertEqual((destination / "docs/specs/item.md").read_bytes(), before_doc)
         self.assertTrue(state.exists())
+
+    def test_schema2_content_defects_do_not_exit_as_migration(self):
+        for defect in ("missing-heading", "broken-link"):
+            with self.subTest(defect=defect):
+                source, destination, state = self.updater_fixture(doc_schema=2)
+                document_path = destination / "docs/specs/item.md"
+                text = document_path.read_text(encoding="utf-8")
+                if defect == "missing-heading":
+                    text = text.replace("## Purpose\n\nContent.\n\n", "")
+                else:
+                    text += "\n[Missing](missing.md)\n"
+                document_path.write_text(text, encoding="utf-8")
+                code, stdout, _ = self.capture_exit(lambda: self.run_update(source, destination, state))
+                self.assertEqual(code, 0)
+                self.assert_migration_report(stdout, [])
+
+    def assert_migration_report(self, output, paths):
+        lines = output.splitlines()
+        self.assertIn("documentation_schema_required=2", lines)
+        self.assertIn(f"documentation_migration_required={len(paths)}", lines)
+        actual_paths = [line for line in lines if line.startswith("MIGRATION_REQUIRED ")]
+        self.assertEqual(actual_paths, [f"MIGRATION_REQUIRED {path}" for path in paths])
+
+    def test_update_check_reports_multiple_migrations_in_sorted_order(self):
+        source, destination, state = self.updater_fixture(doc_schema=2)
+        write_doc(destination, "docs/design/b-design.md", document("design", 1))
+        write_doc(destination, "docs/specs/a-spec.md", document("specification", 1))
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(stdout):
+            self.run_update(source, destination, state)
+        self.assertEqual(exc.exception.code, 3)
+        self.assert_migration_report(stdout.getvalue(), [
+            "docs/design/b-design.md", "docs/specs/a-spec.md",
+        ])
 
     def test_update_succeeds_when_migration_is_resolved(self):
         source, destination, state = self.updater_fixture(doc_schema=2)
@@ -257,9 +373,12 @@ class DocumentationSchemaTests(unittest.TestCase):
     def test_conflict_exit_code_precedes_migration_exit_code(self):
         source, destination, state = self.updater_fixture(state=False)
         write_doc(destination, "managed.md", "local content\n")
-        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(io.StringIO()):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, contextlib.redirect_stdout(stdout):
             self.run_update(source, destination, state)
         self.assertEqual(exc.exception.code, 2)
+        self.assert_migration_report(stdout.getvalue(), ["docs/specs/item.md"])
+        self.assertIn("CONFLICT managed.md", stdout.getvalue().splitlines())
 
     def test_old_source_manifest_defaults_to_schema1(self):
         source, destination, state = self.updater_fixture(required_schema=..., doc_schema=1)

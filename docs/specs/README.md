@@ -6,10 +6,9 @@ Start new documents from the [specification template](../templates/spec-template
 
 ## Ownership map
 
-There are no durable specifications in this starter scaffold yet. Add one row for each approved semantic area when its owner document exists.
-
 | Semantic area | Owner |
 |---|---|
+| Agent documentation validation and template-update CLI behavior | [Agent Tooling Specification](agent-tooling-spec.md) |
 
 The fenced example shows link syntax only; replace it with a link to an existing owner before using it:
 

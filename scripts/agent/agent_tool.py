@@ -938,18 +938,15 @@ def documentation_migrations(required_schema: int) -> list[str]:
     if required_schema < 2:
         return []
     migrations: list[str] = []
-    for base, marker, doc_type in [
-        (ROOT / "docs" / "specs", "<!-- agent-doc-type: specification -->", "specification"),
-        (ROOT / "docs" / "design", "<!-- agent-doc-type: design -->", "design"),
-    ]:
+    for base in [ROOT / "docs" / "specs", ROOT / "docs" / "design"]:
         if not base.exists():
             continue
         for path in sorted(base.rglob("*.md")):
             if path.name.casefold() == "readme.md":
                 continue
             text = path.read_text(encoding="utf-8")
-            invalid = marker not in text or bool(validate_doc(path, doc_type, required_schema))
-            if invalid:
+            schema, schema_errors = parse_document_schema(text, path)
+            if not schema_errors and schema < required_schema:
                 migrations.append(str(path.relative_to(ROOT)))
     return sorted(set(migrations))
 

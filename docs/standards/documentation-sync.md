@@ -24,7 +24,7 @@ Every durable rule has exactly one semantic owner. Other documents link to that 
 
 | Change | Specs | Design | Status/evidence |
 |---|---|---|---|
-| externally observable behavior/API/protocol | update first | if architecture changes | update current state |
+| externally observable product or tool behavior/API/protocol | update first | if architecture changes | update current state |
 | durable architecture/ownership/threading | only if contract changes | update first | update current state |
 | implementation-only refactor | no | only if durable design changes | usually no |
 | bug fix conforming to existing contract | no | only if prior design was wrong/incomplete | update if tracked gap closes |
