@@ -152,6 +152,18 @@ def validate_profile_v2(data: dict[str, Any]) -> dict[str, Any]:
             fail(f"invalid schema-2 project profile: {name} must contain non-empty strings")
         return value
 
+    def valid_manifest_value(value: str) -> bool:
+        return not any(
+            char in {",", "="} or unicodedata.category(char) in {"Cc", "Zl", "Zp"}
+            for char in value
+        )
+
+    def manifest_string_list(value: Any, name: str, *, allow_empty: bool = True) -> list[str]:
+        items = string_list(value, name, allow_empty=allow_empty)
+        if any(not valid_manifest_value(item) for item in items):
+            fail(f"invalid schema-2 project profile: {name} values must not contain commas, equals signs, line separators, or control characters")
+        return items
+
     def validate_hooks(value: Any, name: str, expected: set[str]) -> None:
         hooks = object_field(value, name)
         unknown = set(hooks) - expected
@@ -174,20 +186,20 @@ def validate_profile_v2(data: dict[str, Any]) -> dict[str, Any]:
         name = f"components[{index}]"
         component = object_field(component_value, name)
         component_id = component.get("id")
-        if not isinstance(component_id, str) or not component_id.strip() or any(char in component_id for char in ",\r\n"):
-            fail(f"invalid schema-2 project profile: {name}.id must be a non-empty single-line identifier without commas")
+        if not isinstance(component_id, str) or not component_id.strip() or not valid_manifest_value(component_id):
+            fail(f"invalid schema-2 project profile: {name}.id must be a non-empty manifest-safe identifier")
         if component_id in component_ids:
             fail(f"invalid schema-2 project profile: duplicate component id {component_id!r}")
         component_ids.add(component_id)
 
-        roots = string_list(component.get("roots"), f"{name}.roots", allow_empty=False)
+        roots = manifest_string_list(component.get("roots"), f"{name}.roots", allow_empty=False)
         for root in roots:
             windows_path = PureWindowsPath(root)
             normalized = root.replace("\\", "/")
             if windows_path.drive or windows_path.root or normalized.startswith("/") or any(part == ".." for part in normalized.split("/")):
                 fail(f"invalid schema-2 project profile: unsafe repository-relative root {root!r}")
 
-        string_list(component.get("stacks"), f"{name}.stacks")
+        manifest_string_list(component.get("stacks"), f"{name}.stacks", allow_empty=False)
         application_types = string_list(component.get("application_types"), f"{name}.application_types", allow_empty=False)
         if len(application_types) != len(set(application_types)):
             fail(f"invalid schema-2 project profile: {name}.application_types must be unique")
@@ -204,8 +216,8 @@ def validate_profile_v2(data: dict[str, Any]) -> dict[str, Any]:
             target_name = f"{name}.targets[{target_index}]"
             target = object_field(target_value, target_name)
             target_id = target.get("id")
-            if not isinstance(target_id, str) or not target_id.strip() or any(char in target_id for char in ",\r\n"):
-                fail(f"invalid schema-2 project profile: {target_name}.id must be a non-empty single-line identifier without commas")
+            if not isinstance(target_id, str) or not target_id.strip() or not valid_manifest_value(target_id):
+                fail(f"invalid schema-2 project profile: {target_name}.id must be a non-empty manifest-safe identifier")
             if target_id in target_ids:
                 fail(f"invalid schema-2 project profile: duplicate target id {target_id!r} in component {component_id!r}")
             target_ids.add(target_id)
@@ -367,6 +379,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         "milestones": {"enabled": milestones, "version_source": "auto"},
         "hooks": global_hooks,
     }
+    validate_profile_v2(data)
     save_config(data)
     merge_gitignore(stacks)
     project_md = ROOT / "docs" / "agents" / "project.md"
@@ -467,6 +480,7 @@ def cmd_run_hook(args: argparse.Namespace) -> None:
         for component in selected:
             for command in component["hooks"].get(args.name, []):
                 steps.append(("command", command))
+        for component in selected:
             for target in component["targets"]:
                 target_commands = target["hooks"].get(args.name, [])
                 if not target_commands:

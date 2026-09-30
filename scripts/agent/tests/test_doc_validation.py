@@ -395,6 +395,23 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertIn("unchanged=2", unchanged_stdout.getvalue().splitlines())
         self.assertIn("applied=0", unchanged_stdout.getvalue().splitlines())
 
+    def test_downstream_update_copies_profile_spec_without_unmanaged_design_and_validates(self):
+        destination = self.root / "downstream"
+        state_path = destination / ".agent/template-state.json"
+        manifest_path = destination / ".agent/template-files.json"
+        args = Namespace(source=str(ROOT), check=False, adopt=False)
+        stdout = io.StringIO()
+        with patch.object(module, "ROOT", destination), patch.object(module, "TEMPLATE_STATE", state_path), patch.object(module, "TEMPLATE_FILES", manifest_path), contextlib.redirect_stdout(stdout):
+            module.cmd_update_template(args)
+            shared_spec = destination / "docs/specs/project-profile-spec.md"
+            design = destination / "docs/design/project-profile-context-design.md"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(shared_spec.is_file())
+            self.assertNotIn("docs/design/project-profile-context-design.md", manifest["files"])
+            self.assertFalse(design.exists())
+            module.cmd_validate_docs(Namespace())
+        self.assertIn("docs_validation=pass", stdout.getvalue())
+
     def test_update_conflicts_on_modified_shared_spec_and_preserves_project_documents(self):
         previous_shared = (ROOT / "docs/specs/agent-tooling-spec.md").read_bytes()
         previous_shared += b"\nPrevious template wording.\n"

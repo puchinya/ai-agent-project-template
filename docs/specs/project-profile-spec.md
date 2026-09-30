@@ -4,7 +4,7 @@
 
 - Status: Approved
 - Owning Issue: [Issue #3](https://github.com/puchinya/ai-agent-project-template/issues/3)
-- Related design: [Project Profile and Context Design](../design/project-profile-context-design.md)
+- Related design: [Project Profile and Context Design](https://github.com/puchinya/ai-agent-project-template/blob/main/docs/design/project-profile-context-design.md)
 
 ## Overview
 
@@ -45,7 +45,7 @@ This specification defines the observable configuration and CLI behavior for `.a
 
 ## Semantic ownership
 
-This document owns project-profile schemas, component/stack/application-type/target meaning, initialization defaults, affected-component parsing, context-routing output, and verification selection/skip behavior. The [Project Profile and Context Design](../design/project-profile-context-design.md) owns internal validation, routing, host-detection, and hook-composition architecture. The [Agent Tooling Specification](agent-tooling-spec.md) continues to own `validate-docs` and `update-template` behavior.
+This document owns project-profile schemas, component/stack/application-type/target meaning, initialization defaults, affected-component parsing, context-routing output, and verification selection/skip behavior. The [Project Profile and Context Design](https://github.com/puchinya/ai-agent-project-template/blob/main/docs/design/project-profile-context-design.md) owns internal validation, routing, host-detection, and hook-composition architecture. The [Agent Tooling Specification](agent-tooling-spec.md) continues to own `validate-docs` and `update-template` behavior.
 
 ## Normative requirements
 
@@ -62,6 +62,7 @@ This document owns project-profile schemas, component/stack/application-type/tar
   - target `runnable_on`: operating systems on which target hooks may run.
 - Schema 2 MUST retain the existing `branch`, `milestones`, and project-level `hooks` responsibilities. Project-level hooks own `branch_switch`, `verify_quick`, and `verify_final`; component and target hooks own only `verify_quick` and `verify_final`.
 - A component MUST have a unique `id`, safe repository-relative `roots`, non-empty stack identifiers, recognized application types, a target list, and component verification hooks. A target MUST have a unique ID within its component, a `runnable_on` list, and target verification hooks.
+- Component and target IDs used in context manifest fields MUST be free of commas, equals signs, line separators, and control characters. Root and stack values MUST also be free of these delimiters because they are emitted in comma-separated values in the line-oriented key/value context manifest.
 - Roots MUST NOT be absolute or escape the repository. The repository root `.` is valid.
 - Hook values MUST be arrays of non-empty command strings. `branch_switch` MUST NOT be configured on components or targets.
 - `runnable_on` values MUST be drawn from `any`, `windows`, `macos`, and `linux`.
@@ -72,7 +73,7 @@ This document owns project-profile schemas, component/stack/application-type/tar
 ### Initialization
 
 - The default schema-2 component MUST be `id: root`, `roots: ["."]`, `application_types: ["generic"]`, and `targets: []`; its stacks MUST come from the existing detectors.
-- `init-project --application-type <comma-separated values>` MUST set the requested built-in application types. When omitted, it MUST use `generic`.
+- `init-project` MUST validate the complete generated profile before writing it. `init-project --application-type <comma-separated values>` MUST set the requested built-in application types. When omitted, it MUST use `generic`.
 - `init-project --target <comma-separated target ids>` MUST add the requested targets to the root component. A newly generated target MUST use `runnable_on: ["any"]` until a maintainer narrows its compatibility in the profile.
 - Rust `cargo clean` MUST be off by default. Only an explicit `--cargo-clean on` MAY add `cargo clean` to the global `branch_switch` hook.
 - Repeated initialization with the same inputs MUST produce deterministic profile and summary output.

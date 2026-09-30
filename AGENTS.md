@@ -11,9 +11,9 @@ If not, run:
 - macOS/Linux: `scripts/agent/init-project.sh`
 - Windows PowerShell: `.\scripts\agent\init-project.ps1`
 
-Then read `docs/agents/project.md`.
+Use `.agent/project.json` as the machine-readable project authority and `scripts/agent/agent-context.* <issue>` for normal agent routing. `docs/agents/project.md` is an optional generated human-readable summary and does not need to be read by default.
 
-Technology-specific commands, cleanup rules, and verification commands MUST come from `.agent/project.json` hooks or `docs/agents/project.md`, not from guessed framework defaults.
+Technology-specific commands, cleanup rules, and verification commands MUST come from validated `.agent/project.json` hooks and the configured project runners, not from the generated Markdown summary or guessed framework defaults.
 
 ## Mandatory task bootstrap
 

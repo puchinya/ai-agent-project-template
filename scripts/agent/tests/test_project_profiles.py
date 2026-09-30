@@ -6,11 +6,12 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import test_doc_validation as support
 
 module = support.module
+ROOT = support.ROOT
 
 
 def profile_v2():
@@ -60,6 +61,17 @@ class ProjectProfileValidationTests(unittest.TestCase):
             ("duplicate component", lambda p: p["components"].append(copy.deepcopy(p["components"][0]))),
             ("unsafe root", lambda p: p["components"][0].update(roots=["../outside"])),
             ("empty stack", lambda p: p["components"][0].update(stacks=[""])),
+            ("comma in root", lambda p: p["components"][0].update(roots=["src,docs"])),
+            ("equals in root", lambda p: p["components"][0].update(roots=["src=docs"])),
+            ("newline in root", lambda p: p["components"][0].update(roots=["src\napplication_profile=docs/standards/application-profiles/embedded.md"])),
+            ("control in root", lambda p: p["components"][0].update(roots=["src\x01app"])),
+            ("comma in stack", lambda p: p["components"][0].update(stacks=["custom,stack"])),
+            ("equals in stack", lambda p: p["components"][0].update(stacks=["custom=stack"])),
+            ("line separator in stack", lambda p: p["components"][0].update(stacks=["custom\u2028stack"])),
+            ("control in stack", lambda p: p["components"][0].update(stacks=["custom\x7fstack"])),
+            ("comma in component id", lambda p: p["components"][0].update(id="root,api")),
+            ("equals in component id", lambda p: p["components"][0].update(id="root=api")),
+            ("newline in target id", lambda p: p["components"][0]["targets"][0].update(id="target\nother")),
             ("unknown application type", lambda p: p["components"][0].update(application_types=["browser"])),
             ("duplicate target", lambda p: p["components"][0]["targets"].append(copy.deepcopy(p["components"][0]["targets"][0]))),
             ("invalid runnable host", lambda p: p["components"][0]["targets"][0].update(runnable_on=["freebsd"])),
@@ -117,6 +129,27 @@ class ProjectProfileInitTests(unittest.TestCase):
             data = json.loads(config.read_text(encoding="utf-8"))
         self.assertEqual(data["hooks"]["branch_switch"], ["cargo clean"])
 
+    def test_rust_cargo_clean_is_off_by_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / ".agent" / "project.json"
+            with patch.object(module, "ROOT", root), patch.object(module, "CONFIG", config), patch.object(module, "merge_gitignore"):
+                args = module.build_parser().parse_args(["init-project", "--stack", "rust"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    module.cmd_init(args)
+            data = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(data["hooks"]["branch_switch"], [])
+
+    def test_init_rejects_manifest_unsafe_stack_before_saving(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / ".agent" / "project.json"
+            with patch.object(module, "ROOT", root), patch.object(module, "CONFIG", config), patch.object(module, "merge_gitignore"):
+                args = module.build_parser().parse_args(["init-project", "--stack", "custom\nstack"])
+                with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                    module.cmd_init(args)
+            self.assertFalse(config.exists())
+
 
 class ProjectProfileHookTests(unittest.TestCase):
     def test_python_hook_uses_available_python_alias(self):
@@ -125,7 +158,7 @@ class ProjectProfileHookTests(unittest.TestCase):
             module.shell("python scripts/agent/agent_tool.py validate-docs")
         self.assertEqual(run_command.call_args.args[0], "python3 scripts/agent/agent_tool.py validate-docs")
 
-    def test_schema2_hook_composes_global_component_and_compatible_target_in_order(self):
+    def test_schema2_hook_groups_global_components_then_compatible_targets(self):
         config = profile_v2()
         config["hooks"]["verify_quick"] = ["global"]
         first = config["components"][0]
@@ -136,7 +169,10 @@ class ProjectProfileHookTests(unittest.TestCase):
         ]
         second = copy.deepcopy(first)
         second.update(id="second", hooks={"verify_quick": ["second-component"], "verify_final": []})
-        second["targets"] = []
+        second["targets"] = [
+            {"id": "second-host-ok", "runnable_on": ["any"], "hooks": {"verify_quick": ["second-target"], "verify_final": []}},
+            {"id": "second-host-skip", "runnable_on": ["windows"], "hooks": {"verify_quick": ["second-skipped-target"], "verify_final": []}},
+        ]
         config["components"].append(second)
         commands = []
         stdout = io.StringIO()
@@ -144,22 +180,41 @@ class ProjectProfileHookTests(unittest.TestCase):
         with patch.object(module, "load_config", return_value=config), patch.object(module, "runtime_host", return_value="linux"), patch.object(module, "shell", side_effect=commands.append), contextlib.redirect_stdout(stdout):
             module.cmd_run_hook(args)
 
-        self.assertEqual(commands, ["global", "first-component", "first-target", "second-component"])
-        self.assertIn("SKIPPED_TARGET_VERIFICATION component=first target=host-skip reason=host_mismatch", stdout.getvalue())
-        self.assertIn("hook=verify_quick commands=4", stdout.getvalue())
+        self.assertEqual(commands, ["global", "first-component", "second-component", "first-target", "second-target"])
+        self.assertEqual(stdout.getvalue().splitlines(), [
+            "SKIPPED_TARGET_VERIFICATION component=first target=host-skip reason=host_mismatch",
+            "SKIPPED_TARGET_VERIFICATION component=second target=second-host-skip reason=host_mismatch",
+            "hook=verify_quick commands=5",
+        ])
 
-    def test_component_selection_is_repeatable_and_uses_profile_order(self):
+    def test_component_selection_scopes_component_and_target_hooks(self):
         config = profile_v2()
+        config["hooks"]["verify_quick"] = ["global"]
         first = config["components"][0]
         first.update(id="first", hooks={"verify_quick": ["first"], "verify_final": []}, targets=[])
+        first["targets"] = [
+            {"id": "first-target", "runnable_on": ["any"], "hooks": {"verify_quick": ["first-target-command"], "verify_final": []}},
+        ]
         second = copy.deepcopy(first)
-        second.update(id="second", hooks={"verify_quick": ["second"], "verify_final": []})
+        second.update(
+            id="second",
+            hooks={"verify_quick": ["second"], "verify_final": []},
+            targets=[
+                {"id": "second-target", "runnable_on": ["any"], "hooks": {"verify_quick": ["second-target-command"], "verify_final": []}},
+                {"id": "second-host-skip", "runnable_on": ["windows"], "hooks": {"verify_quick": ["second-skipped-target"], "verify_final": []}},
+            ],
+        )
         config["components"].append(second)
         commands = []
-        args = Namespace(name="verify_quick", component=["second", "first"])
-        with patch.object(module, "load_config", return_value=config), patch.object(module, "shell", side_effect=commands.append), contextlib.redirect_stdout(io.StringIO()):
+        stdout = io.StringIO()
+        args = Namespace(name="verify_quick", component=["second"])
+        with patch.object(module, "load_config", return_value=config), patch.object(module, "runtime_host", return_value="linux"), patch.object(module, "shell", side_effect=commands.append), contextlib.redirect_stdout(stdout):
             module.cmd_run_hook(args)
-        self.assertEqual(commands, ["first", "second"])
+        self.assertEqual(commands, ["global", "second", "second-target-command"])
+        self.assertEqual(stdout.getvalue().splitlines(), [
+            "SKIPPED_TARGET_VERIFICATION component=second target=second-host-skip reason=host_mismatch",
+            "hook=verify_quick commands=3",
+        ])
 
     def test_schema1_hook_behavior_is_kept(self):
         config = {"schema_version": 1, "hooks": {"verify_quick": ["legacy"]}}
@@ -168,11 +223,105 @@ class ProjectProfileHookTests(unittest.TestCase):
             module.cmd_run_hook(Namespace(name="verify_quick", component=[]))
         self.assertEqual(commands, ["legacy"])
 
+    def test_invalid_profile_fails_before_context_output_or_hook_execution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config_path = root / "project.json"
+            state = root / "state"
+            issue = {
+                "number": 7,
+                "labels": [{"name": "phase:review"}],
+                "url": "https://example.invalid/issues/7",
+                "body": "## Affected components\n\n- `root`\n",
+            }
+
+            def fake_run(args, *, capture=False, check=True):
+                if args[:3] == ["gh", "issue", "view"]:
+                    return json.dumps(issue)
+                if args == ["git", "branch", "--show-current"]:
+                    return "feature/7-demo"
+                if args == ["git", "rev-parse", "HEAD"]:
+                    return "a" * 40
+                if args[:3] == ["gh", "repo", "view"]:
+                    return "main"
+                if args == ["git", "status", "--porcelain"]:
+                    return ""
+                if args[:3] == ["gh", "pr", "list"]:
+                    return "{}"
+                raise AssertionError(f"unexpected command: {args}")
+
+            for field, bad_value in (("roots", "src\napplication_profile=docs/standards/application-profiles/embedded.md"), ("stacks", "custom,stack")):
+                with self.subTest(field=field):
+                    config = profile_v2()
+                    config["components"][0][field] = [bad_value]
+                    config_path.write_text(json.dumps(config), encoding="utf-8")
+                    context_output = io.StringIO()
+                    with patch.object(module, "CONFIG", config_path), patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), patch.object(module, "STATE", state), contextlib.redirect_stdout(context_output), self.assertRaises(SystemExit):
+                        module.cmd_context(Namespace(issue=7))
+                    self.assertEqual(context_output.getvalue(), "")
+
+                    shell = Mock()
+                    with patch.object(module, "CONFIG", config_path), patch.object(module, "shell", shell), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit):
+                        module.cmd_run_hook(Namespace(name="verify_quick", component=[]))
+                    shell.assert_not_called()
+
+
+class ProjectProfileDocumentationRuleTests(unittest.TestCase):
+    def test_agents_does_not_require_the_generated_project_summary(self):
+        instructions = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertNotIn("Then read `docs/agents/project.md`.", instructions)
+        self.assertIn("`.agent/project.json` as the machine-readable project authority", instructions)
+        self.assertIn("optional generated human-readable summary", instructions)
+
 
 class AffectedComponentRoutingTests(unittest.TestCase):
     def test_canonical_affected_components_section(self):
         body = "## Affected components\n\n- `desktop`\n- `server`\n\n## Acceptance criteria\n"
         self.assertEqual(module.parse_affected_components(body), ["desktop", "server"])
+
+    def test_normalized_issue_3_affected_components_section_routes_root(self):
+        issue = {
+            "number": 3,
+            "labels": [{"name": "phase:review"}],
+            "url": "https://github.com/puchinya/ai-agent-project-template/issues/3",
+            "body": """## Objective
+
+Generalize project profiles and context routing.
+
+Repository-wide agent tooling, workflow documentation, standards, and the template manifest are in scope.
+
+## Affected components
+
+- `root`
+
+## Functional requirements
+
+- Preserve schema 1 compatibility.
+""",
+        }
+
+        def fake_run(args, *, capture=False, check=True):
+            if args[:3] == ["gh", "issue", "view"]:
+                return json.dumps(issue)
+            if args == ["git", "branch", "--show-current"]:
+                return "feature/3-project-profiles-and-context-routing"
+            if args == ["git", "rev-parse", "HEAD"]:
+                return "a" * 40
+            if args[:3] == ["gh", "repo", "view"]:
+                return "main"
+            if args == ["git", "status", "--porcelain"]:
+                return ""
+            if args[:3] == ["gh", "pr", "list"]:
+                return "{\"number\":4,\"url\":\"https://github.com/puchinya/ai-agent-project-template/pull/4\"}"
+            raise AssertionError(f"unexpected command: {args}")
+
+        with tempfile.TemporaryDirectory() as temp:
+            output = io.StringIO()
+            with patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), patch.object(module, "load_config", return_value=profile_v2()), patch.object(module, "runtime_host_label", return_value="macos/arm64"), patch.object(module, "STATE", Path(temp)), contextlib.redirect_stdout(output):
+                module.cmd_context(Namespace(issue=3))
+        self.assertIn("issue=3", output.getvalue())
+        self.assertIn("affected_components=root", output.getvalue())
+        self.assertIn("component.root.roots=.", output.getvalue())
 
     def test_single_component_defaults_and_multi_component_requires_explicit_section(self):
         profile = profile_v2()
