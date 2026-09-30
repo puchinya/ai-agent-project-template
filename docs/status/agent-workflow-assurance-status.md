@@ -16,11 +16,13 @@ Issue #5 requirements and the approved assurance and project-profile specificati
 
 ## Known gaps
 
-- GitHub platform-matrix jobs and Required Checks still need to run against a pushed pull request.
-- The Issue contract pointer and public Self-review handoff evidence are not yet published.
+- The Issue contract pointer still needs publication before the Ready-only PR metadata check can pass.
+- `main` has no branch protection or configured Required Checks; handoff therefore fails closed.
+- The PR metadata job runs only after the pull request leaves Draft.
 
 ## Verification state
 
 - 80 local Python tests pass.
 - `py_compile`, `validate-docs` (5 owners, 0 warnings), and the configured `verify_final` hook pass.
-- All seven new Unix wrappers start and show help successfully; Windows wrapper smoke and the remote CI matrix remain pending.
+- All seven Unix wrapper help checks pass, and the PR matrix passes on Ubuntu, Windows, and macOS (4 jobs).
+- The Windows PowerShell wrapper smoke passed in CI. The PR metadata job was skipped while the pull request remained Draft.
