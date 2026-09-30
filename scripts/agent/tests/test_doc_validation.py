@@ -32,7 +32,8 @@ def document(doc_type, schema=1, *, omit=None, extra=""):
 def write_doc(root, relative, content):
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="") as output:
+        output.write(content)
     return path
 
 
@@ -136,7 +137,7 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertEqual(module.documentation_migrations(2), [])
         code, _, stderr = self.capture_exit(lambda: module.cmd_validate_docs(Namespace()))
         self.assertEqual(code, 1)
-        self.assertIn(f"{path.relative_to(self.root)}: missing section '## Purpose'", stderr)
+        self.assertIn(f"{path.relative_to(self.root).as_posix()}: missing section '## Purpose'", stderr)
 
     def test_schema2_broken_link_is_not_migration_and_fails_validate_docs(self):
         self.set_manifest(2)
@@ -157,8 +158,8 @@ class DocumentationSchemaTests(unittest.TestCase):
             self.root, "docs/design/legacy-design.md", document("design", None)
         )
         self.assertEqual(module.documentation_migrations(2), [
-            str(missing_marker.relative_to(self.root)),
-            str(explicit_schema.relative_to(self.root)),
+            missing_marker.relative_to(self.root).as_posix(),
+            explicit_schema.relative_to(self.root).as_posix(),
         ])
 
     def test_invalid_schema_markers_are_not_migrations_and_fail_validate_docs(self):

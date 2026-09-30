@@ -23,6 +23,10 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / ".agent" / "project.json"
 STATE = ROOT / ".agent-state" / "issues"
+
+def repo_relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
 SPEC_REQUIRED_V1 = [
     "Purpose",
     "Scope",
@@ -1014,9 +1018,9 @@ def cmd_prepare_review(args: argparse.Namespace) -> None:
             "\n".join(f"- {i} | PENDING |" for i, _s, _t in entries) + "\n",
             encoding="utf-8"
         )
-    print(f"review_checklist_path={checklist.relative_to(ROOT)}")
+    print(f"review_checklist_path={repo_relative(checklist)}")
     print(f"review_checklist_sha256={fingerprint}")
-    print(f"self_review_path={review.relative_to(ROOT)}")
+    print(f"self_review_path={repo_relative(review)}")
     print(f"checklist_changed={1 if changed else 0}")
 
 def cmd_validate_review(args: argparse.Namespace) -> None:
@@ -1095,7 +1099,7 @@ def cmd_save_contract(args: argparse.Namespace) -> None:
     sha = validate_contract_payload(data, args.issue)
     write_contract_mirror(base, data)
     dest = base / "implementation-contract.md"
-    print(f"contract_path={dest.relative_to(ROOT)}")
+    print(f"contract_path={repo_relative(dest)}")
     print(f"contract_sha256={sha}")
 
 def validate_contract_payload(data: bytes, issue: int) -> str:
@@ -1712,13 +1716,13 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
         "---\n\n"
     )
     path.write_text(front + body.lstrip(), encoding="utf-8")
-    print(path.relative_to(ROOT))
+    print(repo_relative(path))
 
 def cmd_resume(args: argparse.Namespace) -> None:
     require("git", "gh")
     path = STATE / str(args.issue) / "checkpoint.md"
     if not path.exists():
-        fail(f"checkpoint not found: {path.relative_to(ROOT)}")
+        fail(f"checkpoint not found: {repo_relative(path)}")
     print(path.read_text(encoding="utf-8").rstrip())
     print("\n--- CURRENT CONTEXT ---")
     cmd_context(args)
@@ -1757,7 +1761,7 @@ def parse_document_schema(text: str, path: Path) -> tuple[int, list[str]]:
         for line_number, line in enumerate(body.splitlines(), start=1)
         if DOCUMENTATION_SCHEMA_MARKER in line
     ]
-    label = str(path.relative_to(ROOT))
+    label = repo_relative(path)
     if not matches:
         return 1, []
     if len(matches) > 1:
@@ -1819,7 +1823,7 @@ def validate_markdown_links(path: Path, text: str) -> list[str]:
     for target in markdown_link_targets(text):
         resolved = local_markdown_target(path, target)
         if resolved is not None and not resolved.is_file():
-            errors.append(f"{path.relative_to(ROOT)}: broken local Markdown link '{target}'")
+            errors.append(f"{repo_relative(path)}: broken local Markdown link '{target}'")
     return errors
 
 
@@ -1829,14 +1833,14 @@ def validate_doc(path: Path, doc_type: str, required_schema: int = 1) -> list[st
     schema, schema_errors = parse_document_schema(text, path)
     errors.extend(schema_errors)
     if required_schema == 2 and schema != 2:
-        errors.append(f"{path.relative_to(ROOT)}: requires {DOCUMENTATION_SCHEMA_2_MARKER}")
+        errors.append(f"{repo_relative(path)}: requires {DOCUMENTATION_SCHEMA_2_MARKER}")
     if doc_type == "specification":
         required = SPEC_REQUIRED_V2 if schema == 2 else SPEC_REQUIRED_V1
     else:
         required = DESIGN_REQUIRED_V2 if schema == 2 else DESIGN_REQUIRED_V1
     headings = markdown_headings(text)
     errors.extend(
-        f"{path.relative_to(ROOT)}: missing section '## {heading}'"
+        f"{repo_relative(path)}: missing section '## {heading}'"
         for heading in required if heading not in headings
     )
     if schema == 2:
@@ -1847,7 +1851,7 @@ def validate_doc(path: Path, doc_type: str, required_schema: int = 1) -> list[st
 def documentation_warnings(path: Path, text: str, doc_type: str, schema: int) -> list[str]:
     if schema != 2:
         return []
-    label = str(path.relative_to(ROOT))
+    label = repo_relative(path)
     warnings: list[str] = []
     if len(text.encode("utf-8")) > DOCUMENTATION_SIZE_WARNING_BYTES:
         warnings.append(
@@ -1864,7 +1868,7 @@ def documentation_warnings(path: Path, text: str, doc_type: str, schema: int) ->
         if linked:
             break
     if not linked:
-        warnings.append(f"{label}: add a link from a README ownership index under {base.relative_to(ROOT)}")
+        warnings.append(f"{label}: add a link from a README ownership index under {repo_relative(base)}")
     return warnings
 
 def cmd_validate_docs(args: argparse.Namespace) -> None:
@@ -1884,7 +1888,7 @@ def cmd_validate_docs(args: argparse.Namespace) -> None:
                 continue
             text = path.read_text(encoding="utf-8")
             if marker not in text:
-                errors.append(f"{path.relative_to(ROOT)}: missing required marker {marker}")
+                errors.append(f"{repo_relative(path)}: missing required marker {marker}")
                 continue
             checked += 1
             doc_errors = validate_doc(path, typ, required_schema)
@@ -1918,7 +1922,7 @@ def cmd_new_doc(args: argparse.Namespace) -> None:
     parts = slug.split("/")[:-1] + [leaf + ".md"]
     dest = ROOT / dest_dir_rel / Path(*parts)
     if dest.exists():
-        fail(f"document already exists: {dest.relative_to(ROOT)}")
+        fail(f"document already exists: {repo_relative(dest)}")
     template = (ROOT / template_rel).read_text(encoding="utf-8")
     title = (args.title or slug.split("/")[-1]).replace("-", " ").replace("_", " ").strip().title()
     template = template.replace(title_token, title)
@@ -1926,7 +1930,7 @@ def cmd_new_doc(args: argparse.Namespace) -> None:
         template = template.replace("#<issue>", f"#{args.issue}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(template, encoding="utf-8")
-    print(dest.relative_to(ROOT))
+    print(repo_relative(dest))
 
 
 TEMPLATE_STATE = ROOT / ".agent" / "template-state.json"
@@ -1964,7 +1968,7 @@ def documentation_migrations(required_schema: int) -> list[str]:
             text = path.read_text(encoding="utf-8")
             schema, schema_errors = parse_document_schema(text, path)
             if not schema_errors and schema < required_schema:
-                migrations.append(str(path.relative_to(ROOT)))
+                migrations.append(repo_relative(path))
     return sorted(set(migrations))
 
 
@@ -2091,10 +2095,10 @@ def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
         ".agent/README.md", ".agent/template-files.json",
         ".github/ISSUE_TEMPLATE/feature.yml", ".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/config.yml", ".github/pull_request_template.md", ".github/workflows/template-ci.yml",
     ]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "agent-workflow").glob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "standards").rglob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "templates").glob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "agent-workflow").glob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "standards").rglob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "templates").glob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
     candidates += [
         "docs/specs/agent-tooling-spec.md", "docs/specs/project-profile-spec.md",
         "docs/specs/agent-workflow-assurance-spec.md", "docs/design/agent-workflow-assurance-design.md",
