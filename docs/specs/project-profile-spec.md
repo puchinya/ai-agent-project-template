@@ -216,9 +216,9 @@ Schema 1 remains readable and preserves the existing flat hook behavior; there i
 
 | Requirement / acceptance criterion | Specification section | Verification |
 |---|---|---|
-| Schema-1 loading and flat hook compatibility; schema-2 validation | [Profile schema](#profile-schema) | `test_project_profiles.py`: schema-1 compatibility and schema validation cases |
-| Schema-2 initialization, opaque stacks, application types, and cargo-clean default | [Initialization](#initialization) | `test_project_profiles.py`: initialization and stack/default cases |
-| Affected-component routing and compact context manifest | [Issue component routing](#issue-component-routing), [Context routing output](#context-routing-output) | `test_project_profiles.py`: single/multi routing and compactness cases |
-| Global/component/target hook order and host mismatch behavior | [Hook selection and ordering](#hook-selection-and-ordering) | `test_project_profiles.py`: exact command order and non-execution assertions |
-| Conditional profiles and template ownership boundaries | [Application profiles and template ownership](#application-profiles-and-template-ownership) | `test_project_profiles.py`: profile routing and manifest coverage; `validate-docs` |
+| Schema-1 loading and flat hook compatibility; schema-2 validation | [Profile schema](#profile-schema) | `test_project_profile.py`: schema-1 compatibility and schema validation cases |
+| Schema-2 initialization, opaque stacks, application types, and cargo-clean default | [Initialization](#initialization) | `test_project_profile.py`: initialization and stack/default cases |
+| Affected-component routing and compact context manifest | [Issue component routing](#issue-component-routing), [Context routing output](#context-routing-output) | `test_project_profile.py`: single/multi routing and compactness cases |
+| Global/component/target hook order and host mismatch behavior | [Hook selection and ordering](#hook-selection-and-ordering) | `test_project_profile.py`: exact command order and non-execution assertions |
+| Conditional profiles and template ownership boundaries | [Application profiles and template ownership](#application-profiles-and-template-ownership) | `test_project_profile.py`: profile routing and manifest coverage; `validate-docs` |
 | Failure, privacy, portability, and unverified-target reporting | [Error and boundary behavior](#error-and-boundary-behavior), [Quality attributes](#quality-attributes) | Focused tests plus configured final verification and Completion Report |
