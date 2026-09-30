@@ -11,9 +11,9 @@ If not, run:
 - macOS/Linux: `scripts/agent/init-project.sh`
 - Windows PowerShell: `.\scripts\agent\init-project.ps1`
 
-Then read `docs/agents/project.md`.
+Use `.agent/project.json` as the machine-readable project authority and `scripts/agent/agent-context.* <issue>` for normal agent routing. `docs/agents/project.md` is an optional generated human-readable summary and does not need to be read by default.
 
-Technology-specific commands, cleanup rules, and verification commands MUST come from `.agent/project.json` hooks or `docs/agents/project.md`, not from guessed framework defaults.
+Technology-specific commands, cleanup rules, and verification commands MUST come from validated `.agent/project.json` hooks and the configured project runners, not from the generated Markdown summary or guessed framework defaults.
 
 ## Mandatory task bootstrap
 
@@ -85,7 +85,17 @@ Approved repository specs/design/Issue decisions override a conflicting contract
 
 ## Context invariant
 
-Keep an Issue-scoped working set: owning Issue/PR, active phase workflow, relevant spec/design/status sections, target symbols/tests/dependencies, project profile, and current relevant diff.
+Keep an Issue-scoped working set in this order:
+
+1. owning Issue/PR;
+2. active phase workflow;
+3. affected components from the Issue and project profile;
+4. conditional application profiles selected by those components;
+5. relevant specification/design/status owners linked from the Issue;
+6. target symbols, tests, and dependencies;
+7. current relevant diff.
+
+Use `scripts/agent/agent-context.* <issue>` to produce a compact routing manifest. Read only the selected application profiles and linked owners; do not load every standard, specification, design, or application profile by default. The manifest routes readers and does not replace the linked documents.
 
 Prefer bounded search/ranges/diffs. Do not scan all docs, repeatedly reread unchanged large files, or paste full logs into active context. Put retained raw logs under `.agent-state/issues/<issue>/logs/`.
 
@@ -107,6 +117,8 @@ Run project hooks through:
 scripts/agent/run-hook.* verify_quick
 scripts/agent/run-hook.* verify_final
 ```
+
+Schema-2 profiles run project, selected component, and compatible target hooks in that order. Repeat `--component <id>` to limit a verification hook to specific components; without it, all components are selected. Schema-1 profiles keep their existing hook behavior.
 
 Do not silently replace configured hooks with ad-hoc alternatives.
 

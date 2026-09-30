@@ -25,6 +25,8 @@ Organize each durable design so readers can move from an ownership index to a co
 
 Every schema-2 design begins substantive content with a concise `## Overview`. It explains the architecture mental model, subsystem boundary, key invariants, important lifecycle/failure constraints, and related authoritative spec/design documents. It is explanatory; detailed sections remain authoritative.
 
+When a schema-2 component selects an application type, apply its linked [conditional application profile](application-profiles/README.md) in addition to this standard. `generic` selects no additional profile. These profiles add focused design and verification questions; they do not replace or copy this standard.
+
 ## Design durability test
 
 > If an internal refactor preserves the same architecture, a sentence that must change solely because a file/function/class name changed is normally too implementation-specific for durable design.

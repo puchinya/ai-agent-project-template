@@ -170,6 +170,8 @@ CSV exportを追加して
 
 エージェントは `AGENTS.md` に従い、リポジトリ変更であれば先に owning Issue を特定します。存在しなければ `phase:requirements` Issue を作成してから詳細調査へ進みます。
 
+schema-2 profileで複数componentがある場合、Issueに `## Affected components` を設けて対象IDを列挙します。その後 `agent-context.sh <issue>` を実行し、選択されたapplication profileと関連するspec/design/status ownerだけを読みます。全standardsや全仕様書を一括で読み込みません。
+
 ### Requirements phase
 
 目的は「実装方法を考えること」ではなく、「何を満たせば完了か」を明確にすることです。
@@ -194,6 +196,8 @@ Document impactはspecification、design、status/evidenceごとに、既存owne
 要求承認後、`phase:design` へ進みます。
 
 新しい機能やdurable architecture変更では、Issueのメモだけで終わらせず、Document Architecture Gateを通します。
+
+実装・設計を広げる前に `agent-context.sh <issue>` のrouting manifestを確認し、影響component、conditional profile、関連ownerの順で対象を絞ります。
 
 - 変更するobservable ruleにはspecification ownerを一つ定める。
 - durable architecture decisionにはdesign ownerを一つ定める。
@@ -221,6 +225,7 @@ Document impactはspecification、design、status/evidenceごとに、既存owne
 実装開始時:
 
 ```bash
+./scripts/agent/agent-context.sh <issue-number>
 ./scripts/agent/prepare-self-review.sh <issue-number>
 ./scripts/agent/start-feature-branch.sh <issue-number> "short english description"
 ```

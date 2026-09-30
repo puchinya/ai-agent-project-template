@@ -58,6 +58,8 @@ Where relevant, distinguish stable and extensible behavior, unknown values, depr
 
 Shared/portable behavior takes precedence over a product, platform, or profile specification. A narrower specification may restrict supported capabilities or add product-specific observable behavior; it must not redefine shared semantics. When shared semantics conflict, the upstream owner wins.
 
+When a schema-2 component selects an application type, apply its linked [conditional application profile](application-profiles/README.md) in addition to this standard. `generic` selects no additional profile. These profiles add focused questions; they do not replace or copy this standard.
+
 ## Current-state-only content
 
 Specifications describe the current required state. Do not retain completed Issue/PR chronology, old attempts, superseded workarounds, commit SHAs, one-off verification results, investigation transcripts, or obsolete hypotheses merely for history. Keep task chronology in Issue/PR/Git history and actual verification state in status/evidence.

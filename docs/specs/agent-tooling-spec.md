@@ -118,7 +118,7 @@ The contract applies to supported repository environments using the provided pla
 
 ## Compatibility and versioning
 
-Schema 1 remains supported when the source manifest omits `documentation_schema_version` or explicitly requires 1. A schema-1 document remains valid when schema 1 is required; schema-2 documents may be used with either minimum. A schema-2 requirement makes schema-1 documents migration-required and causes `validate-docs` to report them as invalid until manually updated. No automatic content migration is provided. Template version remains 0.4.0 for this contract.
+Schema 1 remains supported when the source manifest omits `documentation_schema_version` or explicitly requires 1. A schema-1 document remains valid when schema 1 is required; schema-2 documents may be used with either minimum. A schema-2 requirement makes schema-1 documents migration-required and causes `validate-docs` to report them as invalid until manually updated. No automatic content migration is provided. The current template version is 0.5.0; this metadata does not change the document migration rules.
 
 ## Acceptance traceability
 

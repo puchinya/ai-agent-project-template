@@ -10,12 +10,7 @@ There are no durable designs in this starter scaffold yet. Add one row for each 
 
 | Architecture area | Owner |
 |---|---|
-
-The fenced example shows link syntax only; replace it with a link to an existing owner before using it:
-
-```markdown
-| Export lifecycle | [Export design](export-design.md) |
-```
+| Project profile validation, context routing, runtime host, and hook composition | [Project Profile and Context Design](project-profile-context-design.md) |
 
 For large projects, add nested README indexes under category directories and link those categories here. Every navigation link must be meaningful and clickable.
 

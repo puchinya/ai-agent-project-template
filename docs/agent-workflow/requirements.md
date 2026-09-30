@@ -17,6 +17,21 @@ Turn the request into a bounded, testable problem statement without starting imp
 7. Do not silently resolve ambiguities that materially affect API, compatibility, architecture, supported platforms, security, or scope.
 8. Use `needs-user-decision` for a blocking user/maintainer decision and `blocked` for an external/technical blocker.
 
+## Affected components
+
+When the project profile has multiple schema-2 components, list every affected component in the Issue using the canonical section:
+
+```markdown
+## Affected components
+
+- `desktop`
+- `server`
+```
+
+Use component IDs from `.agent/project.json`; do not use an `all` token. A single-component schema-2 project may omit the section, in which case its only component is selected. Schema-1 projects retain root-project scope. The [Project Profile and Agent Context Specification](../specs/project-profile-spec.md) owns parsing and error behavior.
+
+Once the Issue identifies the affected components, run `agent-context.* <issue>` before broad source or document inspection. Read only the selected conditional application profiles and the relevant specification/design/status owners it routes.
+
 ## Document impact
 
 Before leaving requirements, state the disposition of each document responsibility in the Issue:

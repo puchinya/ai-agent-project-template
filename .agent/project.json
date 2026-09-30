@@ -1,8 +1,26 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "initialized": false,
-  "project_name": "",
-  "stacks": [],
+  "project_name": "ai-agent-project-template",
+  "components": [
+    {
+      "id": "root",
+      "roots": [
+        "."
+      ],
+      "stacks": [
+        "generic"
+      ],
+      "application_types": [
+        "generic"
+      ],
+      "targets": [],
+      "hooks": {
+        "verify_quick": [],
+        "verify_final": []
+      }
+    }
+  ],
   "branch": {
     "prefix": "feature",
     "max_slug_length": 48
