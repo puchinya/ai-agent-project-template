@@ -265,6 +265,148 @@ class ProjectProfileHookTests(unittest.TestCase):
                         module.cmd_run_hook(Namespace(name="verify_quick", component=[]))
                     shell.assert_not_called()
 
+class TargetRequirementsTests(unittest.TestCase):
+    def test_target_requirements_are_validated_and_old_schema2_targets_remain_valid(self):
+        profile = profile_v2()
+        module.validate_profile_v2(profile)
+        invalid = [
+            {"architectures": [], "tools": []},
+            {"architectures": "arm64", "tools": [], "capabilities": []},
+            {"architectures": [], "tools": ["  "], "capabilities": []},
+        ]
+        for requirements in invalid:
+            with self.subTest(requirements=requirements):
+                candidate = copy.deepcopy(profile)
+                candidate["components"][0]["targets"][0]["requirements"] = requirements
+                with self.assertRaises(SystemExit):
+                    module.validate_profile_v2(candidate)
+
+    def test_target_mismatch_skips_hooks_without_executing_them(self):
+        cases = [
+            ({"architectures": ["mips"], "tools": [], "capabilities": []}, "architecture_mismatch"),
+            ({"architectures": [], "tools": ["definitely-missing-tool"], "capabilities": []}, "missing_tool"),
+            ({"architectures": [], "tools": [], "capabilities": ["gpu"]}, "missing_capability"),
+        ]
+        for requirements, expected_reason in cases:
+            with self.subTest(reason=expected_reason):
+                config = profile_v2()
+                target = config["components"][0]["targets"][0]
+                target["hooks"]["verify_quick"] = ["must-not-run"]
+                target["requirements"] = requirements
+                shell = Mock()
+                output = io.StringIO()
+                with patch.object(module, "load_config", return_value=config), \
+                     patch.object(module, "runtime_host", return_value="linux"), \
+                     patch.object(module.platform, "machine", return_value="arm64"), \
+                     patch.object(module.shutil, "which", return_value=None), \
+                     patch.object(module, "shell", shell), contextlib.redirect_stdout(output):
+                    module.cmd_run_hook(Namespace(name="verify_quick", component=[], issue=None, capability=[]))
+                shell.assert_not_called()
+                self.assertIn(f"reason={expected_reason}", output.getvalue())
+
+    def test_explicit_capability_allows_target_command(self):
+        config = profile_v2()
+        target = config["components"][0]["targets"][0]
+        target["hooks"]["verify_quick"] = ["capability-target"]
+        target["requirements"] = {"architectures": ["aarch64"], "tools": ["python3"], "capabilities": ["gpu"]}
+        shell = Mock()
+        with patch.object(module, "load_config", return_value=config), \
+             patch.object(module, "runtime_host", return_value="linux"), \
+             patch.object(module.platform, "machine", return_value="arm64"), \
+             patch.object(module.shutil, "which", return_value="/usr/bin/python3"), \
+             patch.object(module, "shell", shell), contextlib.redirect_stdout(io.StringIO()):
+            module.cmd_run_hook(Namespace(name="verify_quick", component=[], issue=None, capability=["gpu"]))
+        shell.assert_called_once_with("capability-target")
+
+    def test_issue_quick_selects_affected_component_and_final_defaults_to_all(self):
+        config = profile_v2()
+        config["hooks"]["verify_quick"] = ["global-quick"]
+        config["hooks"]["verify_final"] = ["global-final"]
+        config["components"][0]["hooks"]["verify_quick"] = ["root-quick"]
+        config["components"][0]["hooks"]["verify_final"] = ["root-final"]
+        second = copy.deepcopy(config["components"][0])
+        second.update(id="server", roots=["src"])
+        second["hooks"] = {"verify_quick": ["server-quick"], "verify_final": ["server-final"]}
+        config["components"].append(second)
+        selected: list[str] = []
+        issue_body = "## Affected components\n\n- `root`\n"
+        def fake_run(command, **_kwargs):
+            self.assertEqual(command[:3], ["gh", "issue", "view"])
+            return json.dumps({"body": issue_body})
+        with patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), \
+             patch.object(module, "load_config", return_value=config), patch.object(module, "shell", side_effect=selected.append):
+            module.cmd_run_hook(Namespace(name="verify_quick", component=[], issue=12, capability=[]))
+        self.assertEqual(selected, ["global-quick", "root-quick"])
+        selected.clear()
+        with patch.object(module, "load_config", return_value=config), patch.object(module, "shell", side_effect=selected.append):
+            module.cmd_run_hook(Namespace(name="verify_final", component=[], issue=None, capability=[]))
+        self.assertEqual(selected, ["global-final", "root-final", "server-final"])
+
+    def test_issue_and_component_selectors_are_mutually_exclusive(self):
+        parser = module.build_parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["run-hook", "verify_quick", "--issue", "1", "--component", "root"])
+
+
+class DocumentImpactRoutingTests(unittest.TestCase):
+    def test_document_impact_accepts_same_repository_owner_and_planned_path(self):
+        body = (
+            "## Document impact\n\n"
+            "- Specification:\n"
+            "  - update existing: [profile spec](https://github.com/example/template/blob/main/docs/specs/project-profile-spec.md)\n"
+            "  - create: `docs/specs/future-spec.md`\n"
+        )
+        owners, planned, diagnostics = module.parse_document_impact(body, "https://github.com/example/template/issues/5")
+        self.assertEqual(owners, ["docs/specs/project-profile-spec.md"])
+        self.assertEqual(planned, ["docs/specs/future-spec.md"])
+        self.assertEqual(diagnostics, [])
+
+    def test_foreign_and_ambiguous_links_are_diagnostics(self):
+        body = (
+            "## Document impact\n\n"
+            "- update existing: [foreign](https://github.com/other/template/blob/main/docs/specs/project-profile-spec.md)\n"
+            "- update existing: a link is required\n"
+        )
+        owners, planned, diagnostics = module.parse_document_impact(body, "https://github.com/example/template/issues/5")
+        self.assertEqual(owners, [])
+        self.assertEqual(planned, [])
+        self.assertEqual(len(diagnostics), 2)
+        self.assertTrue(any("foreign_repository" in item for item in diagnostics))
+
+    def test_agent_context_emits_owner_paths_without_fetching_comment_lists(self):
+        body = (
+            "## Affected components\n\n- `root`\n\n"
+            "## Document impact\n\n"
+            "- Specification:\n"
+            "  - update existing: [profile spec](https://github.com/example/template/blob/main/docs/specs/project-profile-spec.md)\n"
+            "  - create: `docs/design/future-design.md`\n"
+        )
+        issue_json = {"number": 5, "labels": [{"name": "phase:implementation"}], "url": "https://github.com/example/template/issues/5", "body": body}
+        commands = []
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[:3] == ["gh", "issue", "view"]:
+                return json.dumps(issue_json)
+            if command[:3] == ["git", "branch", "--show-current"]:
+                return "feature/5-test"
+            if command[:3] == ["git", "rev-parse", "HEAD"]:
+                return "a" * 40
+            if command[:3] == ["gh", "repo", "view"]:
+                return "main"
+            if command[:3] == ["git", "status", "--porcelain"]:
+                return ""
+            if command[:3] == ["gh", "pr", "list"]:
+                return "{}"
+            raise AssertionError(f"unexpected command: {command}")
+        with tempfile.TemporaryDirectory() as temp:
+            output = io.StringIO()
+            with patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), \
+                 patch.object(module, "load_config", return_value=profile_v2()), patch.object(module, "STATE", Path(temp)), \
+                 patch.object(module, "runtime_host_label", return_value="macos/arm64"), contextlib.redirect_stdout(output):
+                module.cmd_context(Namespace(issue=5))
+        self.assertIn("document_owner=docs/specs/project-profile-spec.md", output.getvalue())
+        self.assertIn("planned_owner=docs/design/future-design.md", output.getvalue())
+        self.assertFalse(any("comments" in str(command) for command in commands))
 
 class ProjectProfileDocumentationRuleTests(unittest.TestCase):
     def test_agents_does_not_require_the_generated_project_summary(self):

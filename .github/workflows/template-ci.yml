@@ -1,0 +1,91 @@
+name: Template CI
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+    steps:
+      - name: Check out pull request or main
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run agent CLI unit tests
+        run: python -B -m unittest discover -s scripts/agent/tests -p 'test_*.py'
+      - name: Compile agent CLI scripts
+        run: python -m py_compile scripts/agent/agent_tool.py scripts/agent/validate-pr-metadata.py
+      - name: Validate template documentation
+        run: python scripts/agent/agent_tool.py validate-docs
+      - name: Smoke-test Bash wrappers
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          for wrapper in publish-implementation-contract restore-implementation-contract verify-implementation-contract publish-self-review validate-public-review delivery-check finalize-merged-issue; do
+            "./scripts/agent/${wrapper}.sh" --help
+          done
+      - name: Smoke-test PowerShell wrappers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $wrappers = @(
+            "publish-implementation-contract.ps1",
+            "restore-implementation-contract.ps1",
+            "verify-implementation-contract.ps1",
+            "publish-self-review.ps1",
+            "validate-public-review.ps1",
+            "delivery-check.ps1",
+            "finalize-merged-issue.ps1"
+          )
+          foreach ($wrapper in $wrappers) {
+            & ".\scripts\agent\$wrapper" --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "wrapper smoke failed: $wrapper" }
+          }
+
+  pr-metadata:
+    name: PR metadata and public evidence
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out pull request
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Validate PR fields and public Self-review
+        run: python scripts/agent/validate-pr-metadata.py ${{ github.event.pull_request.number }}

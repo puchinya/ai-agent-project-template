@@ -60,6 +60,12 @@ If requested behavior changes a public or observable contract, the design phase 
 
 Acceptance criteria should be observable. Architecture-specific obligations belong in design and the Reviewer Checklist.
 
+## Contract and routing fields
+
+If the request arrives as an Implementation Contract, include its owning Issue, exact local source path, and SHA-256 in the Issue record. Keep the full text in one approved top-level Issue comment and its verified local mirror; the Issue body stores only the comment ID, SHA-256, and approved state. Do not duplicate the contract's Reviewer Checklist in the Issue.
+
+For schema-2 projects, list affected component IDs in `## Affected components`. Use `## Document impact` to link existing owners or record exact future paths under `docs/specs/`, `docs/design/`, or `docs/status/`; link existing owners from the same repository.
+
 ## Completion
 
 Requirements are ready for design when scope/non-goals are clear, acceptance criteria are testable, Document impact is explicit, and no unresolved question blocks design.

@@ -5,3 +5,9 @@ Concise current implementation, known gaps, and useful verification state live h
 Status is navigation/current-state material, not requirements authority and not an evidence archive.
 
 File naming: use `-status.md` as the suffix for durable documents.
+
+## Current status owners
+
+| Area | Owner |
+|---|---|
+| Agent workflow contract, review, delivery, and verification state | [Agent Workflow Assurance Status](agent-workflow-assurance-status.md) |

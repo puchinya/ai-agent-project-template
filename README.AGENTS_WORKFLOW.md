@@ -271,6 +271,8 @@ PowerShell:
 
 新しいcommitが入った時点で以前のセルフレビューは stale です。再レビューします。
 
+公開時は PR のトップレベル会話コメントとして `publish-self-review` を実行します。PR本文には Comment ID、SHA-256、Reviewed-HEADだけを記録します。`validate-public-review` はコメントをID指定で再取得し、ChecklistとHEADを独立に照合します。自己レビューは第三者レビューや証拠の独立検証の代わりにはなりません。
+
 ## 5. Pull Requestとレビュー
 
 PRはIssueの全文を複製せず、差分中心にします。
@@ -282,12 +284,20 @@ PRはIssueの全文を複製せず、差分中心にします。
 ## Delta
 ## Design deviations
 ## Verification
-## Untested / residual risk
+Results: <commands and actual results>
+## Untested
+Platforms/targets: <list, or none>
+## Generic profile rationale
+Generic profile rationale: <specific reason, or N/A when no affected component is generic>
+## Self-review
+Comment ID: <public comment ID>
+SHA-256: <64 hex characters>
+Reviewed-HEAD: <40 hex characters>
 ## Reviewer focus
 Closes #<issue>
 ```
 
-PR作成後、Issueを `phase:review` にします。
+まずDraft PRを作成してIssueを `phase:review` にし、ローカルSelf-reviewを公開します。本文を完成させたらPRをReadyにし、Required Checksの成功後に `delivery-check --stage handoff` を実行します。未設定・pending・失敗のRequired Checkは通過扱いになりません。Affected componentが `generic` の場合は、Generic profile rationaleに用途と採用理由を具体的に記載します。
 
 レビュー修正でコードが変わった場合は:
 
@@ -324,6 +334,8 @@ checkpointは短く保ちます。思考過程、秘密情報、巨大ログは�
 
 ```bash
 ./scripts/agent/save-implementation-contract.sh <issue-number> instruction.md
+./scripts/agent/publish-implementation-contract.sh <issue-number> --source instruction.md
+./scripts/agent/verify-implementation-contract.sh <issue-number>
 ```
 
 保存先:
@@ -334,6 +346,8 @@ checkpointは短く保ちます。思考過程、秘密情報、巨大ログは�
 ```
 
 Contractはworkflow bypassではありません。Issue ownership、既存spec/designとの整合、セルフレビューは引き続き必要です。
+
+Issue本文はコメントID/SHA/approved状態だけを保持し、全文はそのIssueのトップレベルコメント一件に置きます。別端末では `restore-implementation-contract` でID指定取得し、SHA・Issue所属を検証してからミラーをatomicに復元します。異なるローカル版を置き換えるときは `--replace-stale` が必要で、旧bytesはSHA付きバックアップに残ります。通常のcontext取得ではコメント一覧も全文も取得しません。
 
 ## 8. 技術スタックごとの最適化
 
