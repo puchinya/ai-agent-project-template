@@ -2,6 +2,8 @@
 
 Read only while the Issue is in `phase:design`.
 
+Before broad design research, confirm the Issue's affected components and run `agent-context.* <issue>`. Read the selected conditional application profiles and only the relevant specification/design/status owners; do not load all standards or ownership documents by default.
+
 ## Goal
 
 Make approved behavior and material architecture decision-complete enough that implementation does not invent major requirements or architecture.

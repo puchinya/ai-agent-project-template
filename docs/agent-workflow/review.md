@@ -4,6 +4,8 @@ Read while the associated PR is open or the Issue is in `phase:review`.
 
 The Issue and its semantic specification owners remain the approved behavior. Design remains the approved durable architecture. The PR describes actual delta and evidence.
 
+Run `agent-context.* <issue>` to identify the affected components and selected conditional application profiles. Focus review on those profiles and the relevant linked owners; do not load all standards or durable documents by default.
+
 ## PR structure
 
 ```text

@@ -6,13 +6,14 @@ Read while the Issue is in `phase:ready` or `phase:implementation`.
 
 Before editing:
 
-1. Re-read the approved Issue and its linked specification/design owners.
-2. Confirm no newer decision supersedes them.
-3. If an Implementation Contract was supplied, save and verify its exact local mirror.
-4. Run `prepare-self-review.* <issue>`.
-5. For source changes, run `start-feature-branch.* <issue> <short-description>`.
-6. Replace `phase:ready` with `phase:implementation`.
-7. Confirm upstream specification/design updates are approved.
+1. Re-read the approved Issue and confirm no newer decision supersedes it.
+2. Run `agent-context.* <issue>` to identify affected components and conditional application profiles.
+3. Read only the linked relevant specification/design/status owners routed for this work.
+4. If an Implementation Contract was supplied, save and verify its exact local mirror.
+5. Run `prepare-self-review.* <issue>`.
+6. For source changes, run `start-feature-branch.* <issue> <short-description>`.
+7. Replace `phase:ready` with `phase:implementation`.
+8. Confirm upstream specification/design updates are approved.
 
 ## Implementation rules
 
@@ -39,6 +40,7 @@ validate-docs.*
 ```
 
 Project hooks are defined by `.agent/project.json`. Record actual results against the verified HEAD in the appropriate evidence location.
+If host-specific targets are reported as `SKIPPED_TARGET_VERIFICATION`, list them under the PR's `Untested / residual risk`; do not report them as verified.
 
 ## Self-review
 

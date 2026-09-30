@@ -277,25 +277,31 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertFalse(set(module.SPEC_REQUIRED_V2) - module.markdown_headings(spec_text))
         self.assertFalse(set(module.DESIGN_REQUIRED_V2) - module.markdown_headings(design_text))
 
-    def test_manifest_refresh_defaults_to_040_and_schema2(self):
+    def test_manifest_refresh_defaults_to_050_and_schema2(self):
         for directory in (
             "docs/agent-workflow", "docs/standards", "docs/templates", "docs/specs",
             "docs/design", "scripts/agent", ".agent",
         ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
+        (self.root / "docs/standards/application-profiles").mkdir(parents=True, exist_ok=True)
         write_doc(self.root, "docs/specs/agent-tooling-spec.md", "shared contract\n")
+        write_doc(self.root, "docs/specs/project-profile-spec.md", "shared profile contract\n")
         write_doc(self.root, "docs/specs/product-feature-spec.md", "project spec\n")
         write_doc(self.root, "docs/design/product-feature-design.md", "project design\n")
+        write_doc(self.root, "docs/standards/application-profiles/desktop-gui.md", "conditional standard\n")
         write_doc(self.root, "docs/specs/README.md", "spec index\n")
         write_doc(self.root, "docs/design/README.md", "design index\n")
         args = Namespace(version=module.build_parser().parse_args(["refresh-template-manifest"]).version)
         module.cmd_refresh_template_manifest(args)
         data = json.loads(module.TEMPLATE_FILES.read_text(encoding="utf-8"))
-        self.assertEqual(data["template_version"], "0.4.0")
+        self.assertEqual(data["template_version"], "0.5.0")
         self.assertEqual(data["documentation_schema_version"], 2)
         self.assertIn("docs/specs/agent-tooling-spec.md", data["files"])
+        self.assertIn("docs/specs/project-profile-spec.md", data["files"])
+        self.assertIn("docs/standards/application-profiles/desktop-gui.md", data["files"])
         self.assertNotIn("docs/specs/product-feature-spec.md", data["files"])
         self.assertNotIn("docs/design/product-feature-design.md", data["files"])
+        self.assertNotIn("docs/design/project-profile-context-design.md", data["files"])
         self.assertNotIn("docs/specs/README.md", data["files"])
         self.assertNotIn("docs/design/README.md", data["files"])
 

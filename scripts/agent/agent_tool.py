@@ -6,13 +6,16 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PureWindowsPath
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import unicodedata
 from datetime import datetime
+import platform
 from typing import Any
 from urllib.parse import unquote, urlsplit
 import xml.etree.ElementTree as ET
@@ -80,6 +83,10 @@ DOCUMENTATION_SCHEMA_2_MARKER = "<!-- agent-doc-schema: 2 -->"
 DOCUMENTATION_SIZE_WARNING_BYTES = 50 * 1024
 CANONICAL_BEGIN = "AGENT_REVIEWER_CHECKLIST_V1_BEGIN"
 CANONICAL_END = "AGENT_REVIEWER_CHECKLIST_V1_END"
+APPLICATION_TYPES = {"generic", "desktop-gui", "cli", "mobile", "server", "embedded", "library"}
+RUNTIME_HOSTS = {"windows", "macos", "linux"}
+GLOBAL_HOOK_NAMES = {"branch_switch", "verify_quick", "verify_final"}
+VERIFICATION_HOOK_NAMES = {"verify_quick", "verify_final"}
 
 def fail(message: str, code: int = 1) -> None:
     print(f"error: {message}", file=sys.stderr)
@@ -96,6 +103,11 @@ def run(args: list[str], *, capture: bool = False, check: bool = True) -> str:
     return result.stdout.strip() if capture else ""
 
 def shell(command: str) -> None:
+    interpreter = re.match(r"^(\s*)(python3?)(?=\s|$)", command)
+    if interpreter and shutil.which(interpreter.group(2)) is None:
+        fallback = "python3" if interpreter.group(2) == "python" else "python"
+        if shutil.which(fallback):
+            command = interpreter.group(1) + fallback + command[interpreter.end(2):]
     print(f"+ {command}")
     subprocess.run(command, cwd=ROOT, shell=True, check=True)
 
@@ -112,13 +124,99 @@ def load_config(require_initialized: bool = True) -> dict[str, Any]:
         data = json.loads(CONFIG.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         fail(f"invalid .agent/project.json: {exc}")
-    if require_initialized and not data.get("initialized"):
+    if not isinstance(data, dict):
+        fail("invalid .agent/project.json: expected a JSON object")
+    if require_initialized and data.get("initialized") is not True:
         fail("project profile is not initialized; run init-project")
-    return data
+    schema = data.get("schema_version")
+    if type(schema) is not int or schema not in {1, 2}:
+        fail(f"unsupported project profile schema: {schema!r}")
+    if schema == 1:
+        return data
+    return validate_profile_v2(data)
 
 def save_config(data: dict[str, Any]) -> None:
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     CONFIG.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+def validate_profile_v2(data: dict[str, Any]) -> dict[str, Any]:
+    def object_field(value: Any, name: str) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            fail(f"invalid schema-2 project profile: {name} must be an object")
+        return value
+
+    def string_list(value: Any, name: str, *, allow_empty: bool = True) -> list[str]:
+        if not isinstance(value, list) or (not allow_empty and not value):
+            fail(f"invalid schema-2 project profile: {name} must be a {'' if allow_empty else 'non-empty '}array of strings")
+        if any(not isinstance(item, str) or not item.strip() for item in value):
+            fail(f"invalid schema-2 project profile: {name} must contain non-empty strings")
+        return value
+
+    def validate_hooks(value: Any, name: str, expected: set[str]) -> None:
+        hooks = object_field(value, name)
+        unknown = set(hooks) - expected
+        if unknown:
+            fail(f"invalid schema-2 project profile: unsupported {name} hook(s): {', '.join(sorted(unknown))}")
+        for hook_name in sorted(expected):
+            commands = hooks.get(hook_name)
+            if not isinstance(commands, list) or any(not isinstance(command, str) or not command.strip() for command in commands):
+                fail(f"invalid schema-2 project profile: {name}.{hook_name} must be an array of non-empty command strings")
+
+    if type(data.get("initialized")) is not bool:
+        fail("invalid schema-2 project profile: initialized must be a boolean")
+    components = data.get("components")
+    if not isinstance(components, list) or not components:
+        fail("invalid schema-2 project profile: components must be a non-empty array")
+    validate_hooks(data.get("hooks"), "hooks", GLOBAL_HOOK_NAMES)
+
+    component_ids: set[str] = set()
+    for index, component_value in enumerate(components):
+        name = f"components[{index}]"
+        component = object_field(component_value, name)
+        component_id = component.get("id")
+        if not isinstance(component_id, str) or not component_id.strip() or any(char in component_id for char in ",\r\n"):
+            fail(f"invalid schema-2 project profile: {name}.id must be a non-empty single-line identifier without commas")
+        if component_id in component_ids:
+            fail(f"invalid schema-2 project profile: duplicate component id {component_id!r}")
+        component_ids.add(component_id)
+
+        roots = string_list(component.get("roots"), f"{name}.roots", allow_empty=False)
+        for root in roots:
+            windows_path = PureWindowsPath(root)
+            normalized = root.replace("\\", "/")
+            if windows_path.drive or windows_path.root or normalized.startswith("/") or any(part == ".." for part in normalized.split("/")):
+                fail(f"invalid schema-2 project profile: unsafe repository-relative root {root!r}")
+
+        string_list(component.get("stacks"), f"{name}.stacks")
+        application_types = string_list(component.get("application_types"), f"{name}.application_types", allow_empty=False)
+        if len(application_types) != len(set(application_types)):
+            fail(f"invalid schema-2 project profile: {name}.application_types must be unique")
+        unknown_types = sorted(set(application_types) - APPLICATION_TYPES)
+        if unknown_types:
+            fail(f"invalid schema-2 project profile: unknown application type(s): {', '.join(unknown_types)}")
+        validate_hooks(component.get("hooks"), f"{name}.hooks", VERIFICATION_HOOK_NAMES)
+
+        targets = component.get("targets")
+        if not isinstance(targets, list):
+            fail(f"invalid schema-2 project profile: {name}.targets must be an array")
+        target_ids: set[str] = set()
+        for target_index, target_value in enumerate(targets):
+            target_name = f"{name}.targets[{target_index}]"
+            target = object_field(target_value, target_name)
+            target_id = target.get("id")
+            if not isinstance(target_id, str) or not target_id.strip() or any(char in target_id for char in ",\r\n"):
+                fail(f"invalid schema-2 project profile: {target_name}.id must be a non-empty single-line identifier without commas")
+            if target_id in target_ids:
+                fail(f"invalid schema-2 project profile: duplicate target id {target_id!r} in component {component_id!r}")
+            target_ids.add(target_id)
+            runnable_on = string_list(target.get("runnable_on"), f"{target_name}.runnable_on", allow_empty=False)
+            if len(runnable_on) != len(set(runnable_on)):
+                fail(f"invalid schema-2 project profile: {target_name}.runnable_on values must be unique")
+            invalid_hosts = sorted(set(runnable_on) - (RUNTIME_HOSTS | {"any"}))
+            if invalid_hosts:
+                fail(f"invalid schema-2 project profile: invalid runnable_on value(s): {', '.join(invalid_hosts)}")
+            validate_hooks(target.get("hooks"), f"{target_name}.hooks", VERIFICATION_HOOK_NAMES)
+    return data
 
 def detect_stacks() -> list[str]:
     stacks: list[str] = []
@@ -180,6 +278,29 @@ def default_hooks(stacks: list[str], cargo_clean: bool) -> dict[str, list[str]]:
     final.append("python scripts/agent/agent_tool.py validate-docs")
     return {"branch_switch": branch, "verify_quick": quick, "verify_final": final}
 
+def default_component_hooks(stacks: list[str]) -> dict[str, list[str]]:
+    hooks = default_hooks(stacks, cargo_clean=False)
+    return {
+        "verify_quick": hooks["verify_quick"],
+        "verify_final": [
+            command for command in hooks["verify_final"]
+            if command != "python scripts/agent/agent_tool.py validate-docs"
+        ],
+    }
+
+def runtime_host() -> str:
+    system = platform.system().casefold()
+    if system == "darwin":
+        return "macos"
+    if system == "windows":
+        return "windows"
+    if system == "linux":
+        return "linux"
+    return system or "unknown"
+
+def runtime_host_label() -> str:
+    return f"{runtime_host()}/{platform.machine() or 'unknown'}"
+
 def merge_gitignore(stacks: list[str]) -> None:
     path = ROOT / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -201,33 +322,85 @@ def merge_gitignore(stacks: list[str]) -> None:
 
 def cmd_init(args: argparse.Namespace) -> None:
     stacks = [x.strip().lower() for x in args.stack.split(",") if x.strip()] if args.stack else detect_stacks()
-    allowed = {"rust", "node", "python", "dotnet", "generic"}
-    unknown = sorted(set(stacks) - allowed)
-    if unknown:
-        fail("unsupported stack(s): " + ", ".join(unknown))
-    cargo_clean = args.cargo_clean == "on" if args.cargo_clean else ("rust" in stacks)
+    if len(stacks) != len(set(stacks)):
+        fail("--stack values must be unique")
+    cargo_clean = args.cargo_clean == "on" if args.cargo_clean else False
     milestones = args.version_milestones == "on" if args.version_milestones else False
+    application_types = [item.strip() for item in (getattr(args, "application_type", None) or "generic").split(",") if item.strip()]
+    if not application_types:
+        fail("--application-type must contain at least one value")
+    unknown_types = sorted(set(application_types) - APPLICATION_TYPES)
+    if unknown_types:
+        fail("unsupported application type(s): " + ", ".join(unknown_types))
+    if len(application_types) != len(set(application_types)):
+        fail("--application-type values must be unique")
+    target_ids = [item.strip() for item in (getattr(args, "target", None) or "").split(",") if item.strip()]
+    if len(target_ids) != len(set(target_ids)):
+        fail("--target values must be unique")
+    component_hooks = default_component_hooks(stacks)
+    global_hooks = {
+        "branch_switch": ["cargo clean"] if cargo_clean else [],
+        "verify_quick": [],
+        "verify_final": ["python scripts/agent/agent_tool.py validate-docs"],
+    }
+    targets = [
+        {
+            "id": target_id,
+            "runnable_on": ["any"],
+            "hooks": {"verify_quick": [], "verify_final": []},
+        }
+        for target_id in target_ids
+    ]
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "initialized": True,
         "project_name": ROOT.name,
-        "stacks": stacks,
+        "components": [{
+            "id": "root",
+            "roots": ["."],
+            "stacks": stacks,
+            "application_types": application_types,
+            "targets": targets,
+            "hooks": component_hooks,
+        }],
         "branch": {"prefix": "feature", "max_slug_length": 48},
         "milestones": {"enabled": milestones, "version_source": "auto"},
-        "hooks": default_hooks(stacks, cargo_clean),
+        "hooks": global_hooks,
     }
     save_config(data)
     merge_gitignore(stacks)
     project_md = ROOT / "docs" / "agents" / "project.md"
+    project_md.parent.mkdir(parents=True, exist_ok=True)
+    component_rows = []
+    for component in data["components"]:
+        roots = ", ".join(f"`{value}`" for value in component["roots"])
+        component_stacks = ", ".join(f"`{value}`" for value in component["stacks"]) or "None"
+        types = ", ".join(f"`{value}`" for value in component["application_types"])
+        component_targets = ", ".join(
+            f"`{target['id']}` ({', '.join(target['runnable_on'])})" for target in component["targets"]
+        ) or "None"
+        component_rows.append(f"| `{component['id']}` | {roots} | {component_stacks} | {types} | {component_targets} |")
+    component_table = (
+        "## Components\n\n"
+        "| ID | Roots | Stacks | Application types | Targets (`runnable_on`) |\n"
+        "|---|---|---|---|---|\n"
+        + "\n".join(component_rows)
+        + "\n\n"
+    )
     def hook_lines(name: str) -> str:
-        cmds = data["hooks"][name]
+        cmds = data["hooks"][name] + [
+            command
+            for component in data["components"]
+            for command in component["hooks"].get(name, [])
+        ]
         return "\n".join(f"- `{c}`" for c in cmds) if cmds else "- None"
     project_md.write_text(
         "# Project profile\n\n"
         f"- Project: `{ROOT.name}`\n"
-        f"- Stacks: {', '.join(f'`{x}`' for x in stacks)}\n"
+        "- Profile schema: `2`\n"
         f"- Version milestones: {'enabled' if milestones else 'disabled'}\n\n"
-        "## Branch-switch hook\n\n" + hook_lines("branch_switch") + "\n\n"
+        + component_table
+        + "## Branch-switch hook\n\n" + hook_lines("branch_switch") + "\n\n"
         "## Quick verification\n\n" + hook_lines("verify_quick") + "\n\n"
         "## Final verification\n\n" + hook_lines("verify_final") + "\n\n"
         "This file is generated from `.agent/project.json`. Edit the JSON when changing project execution policy, then keep this file synchronized.\n",
@@ -268,9 +441,61 @@ def cmd_setup_github(args: argparse.Namespace) -> None:
 
 def cmd_run_hook(args: argparse.Namespace) -> None:
     cfg = load_config()
+    if cfg.get("schema_version") == 2:
+        if args.name not in GLOBAL_HOOK_NAMES:
+            fail(f"unknown hook: {args.name}")
+        if args.name == "branch_switch":
+            if getattr(args, "component", None):
+                fail("--component only applies to verification hooks")
+            commands = cfg["hooks"].get(args.name, [])
+            for command in commands:
+                shell(command)
+            print(f"hook={args.name} commands={len(commands)}")
+            return
+
+        components = cfg["components"]
+        requested = getattr(args, "component", None) or []
+        known_ids = {component["id"] for component in components}
+        unknown = [component_id for component_id in requested if component_id not in known_ids]
+        if unknown:
+            fail("unknown component id(s): " + ", ".join(dict.fromkeys(unknown)))
+        selected_ids = set(requested) if requested else known_ids
+        selected = [component for component in components if component["id"] in selected_ids]
+        steps: list[tuple[str, str]] = []
+        for command in cfg["hooks"].get(args.name, []):
+            steps.append(("command", command))
+        for component in selected:
+            for command in component["hooks"].get(args.name, []):
+                steps.append(("command", command))
+            for target in component["targets"]:
+                target_commands = target["hooks"].get(args.name, [])
+                if not target_commands:
+                    continue
+                runnable_on = target["runnable_on"]
+                if "any" in runnable_on or runtime_host() in runnable_on:
+                    for command in target_commands:
+                        steps.append(("command", command))
+                else:
+                    steps.append((
+                        "diagnostic",
+                        "SKIPPED_TARGET_VERIFICATION "
+                        f"component={component['id']} target={target['id']} reason=host_mismatch",
+                    ))
+        executed = 0
+        for kind, value in steps:
+            if kind == "command":
+                shell(value)
+                executed += 1
+            else:
+                print(value)
+        print(f"hook={args.name} commands={executed}")
+        return
+
     hooks = cfg.get("hooks", {})
     if args.name not in hooks:
         fail(f"unknown hook: {args.name}")
+    if getattr(args, "component", None):
+        fail("--component is only supported by schema-2 project profiles")
     commands = hooks.get(args.name) or []
     if not commands:
         print(f"hook={args.name} commands=0")
@@ -385,9 +610,60 @@ def extract_phase(issue: dict[str, Any]) -> str:
     names = [x.get("name", "") for x in labels if isinstance(x, dict)]
     return next((n for n in names if n.startswith("phase:")), "")
 
+def parse_affected_components(body: str) -> list[str] | None:
+    lines = markdown_without_fences(body).splitlines()
+    headings = [
+        index for index, line in enumerate(lines)
+        if re.fullmatch(r"##\s+Affected components\s*#*\s*", line.strip(), re.I)
+    ]
+    if not headings:
+        return None
+    if len(headings) != 1:
+        fail("Issue body must contain at most one '## Affected components' section")
+    values: list[str] = []
+    for line in lines[headings[0] + 1:]:
+        if re.match(r"^#{1,6}\s+", line):
+            break
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"\s*-\s+`([^`]+)`\s*", line)
+        if not match:
+            fail("Affected components entries must use '- `component-id`' list items")
+        values.append(match.group(1))
+    if not values:
+        fail("Affected components section must list at least one component")
+    if len(values) != len(set(values)):
+        fail("Affected components section contains duplicate component ids")
+    return values
+
+def context_profile_components(cfg: dict[str, Any], issue_body: str) -> tuple[int, list[dict[str, Any]], list[str]]:
+    schema = cfg["schema_version"]
+    if schema == 1:
+        component = {
+            "id": "root",
+            "roots": ["."],
+            "stacks": cfg.get("stacks", []),
+            "application_types": ["generic"],
+            "targets": [],
+        }
+        return schema, [component], ["root"]
+
+    components = cfg["components"]
+    component_by_id = {component["id"]: component for component in components}
+    requested = parse_affected_components(issue_body)
+    if requested is None:
+        if len(components) != 1:
+            fail("multi-component Issue must include an '## Affected components' section")
+        requested = [components[0]["id"]]
+    unknown = [component_id for component_id in requested if component_id not in component_by_id]
+    if unknown:
+        fail("unknown affected component id(s): " + ", ".join(unknown))
+    selected_ids = [component["id"] for component in components if component["id"] in set(requested)]
+    return schema, [component_by_id[item] for item in selected_ids], selected_ids
+
 def cmd_context(args: argparse.Namespace) -> None:
     require("git", "gh")
-    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url"], capture=True))
+    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url,body"], capture=True))
     phase = extract_phase(issue_json)
     workflow = {
         "phase:requirements": "docs/agent-workflow/requirements.md",
@@ -413,6 +689,8 @@ def cmd_context(args: argparse.Namespace) -> None:
             recorded = sha_path.read_text(encoding="utf-8").strip().split()[0] if sha_path.read_text(encoding="utf-8").strip() else ""
             if recorded == contract_sha:
                 contract_status = "ok"
+    cfg = load_config()
+    profile_schema, components, affected_ids = context_profile_components(cfg, issue_json.get("body", ""))
     print(f"issue={args.issue}")
     print(f"phase={phase}")
     print(f"workflow={workflow}")
@@ -423,6 +701,23 @@ def cmd_context(args: argparse.Namespace) -> None:
     print(f"pr={pr}")
     print(f"contract_status={contract_status}")
     print(f"contract_sha256={contract_sha}")
+    print(f"profile_schema={profile_schema}")
+    print(f"runtime_host={runtime_host_label()}")
+    print(f"affected_components={','.join(affected_ids)}")
+    for component in components:
+        prefix = f"component.{component['id']}"
+        print(f"{prefix}.roots={','.join(component['roots'])}")
+        print(f"{prefix}.stacks={','.join(component['stacks'])}")
+        print(f"{prefix}.application_types={','.join(component['application_types'])}")
+        print(f"{prefix}.targets={','.join(target['id'] for target in component['targets'])}")
+    profile_types = sorted({
+        application_type
+        for component in components
+        for application_type in component["application_types"]
+        if application_type != "generic"
+    })
+    for application_type in profile_types:
+        print(f"application_profile=docs/standards/application-profiles/{application_type}.md")
 
 def state_dir(issue: int) -> Path:
     p = STATE / str(issue)
@@ -1075,10 +1370,10 @@ def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
         ".github/ISSUE_TEMPLATE/feature.yml", ".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/config.yml", ".github/pull_request_template.md",
     ]
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "agent-workflow").glob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "standards").glob("*.md")]
+    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "standards").rglob("*.md")]
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "templates").glob("*.md")]
     candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
-    candidates += ["docs/specs/agent-tooling-spec.md"]
+    candidates += ["docs/specs/agent-tooling-spec.md", "docs/specs/project-profile-spec.md"]
     # Presentation is included as template documentation, but project teams may replace it intentionally.
     candidates += ["docs/presentations/README.md", "docs/presentations/ai-agent-project-template-introduction.pptx"]
     for rel in sorted(set(candidates)):
@@ -1100,6 +1395,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("init-project")
     s.add_argument("--stack", help="comma-separated: rust,node,python,dotnet,generic")
+    s.add_argument("--application-type", help="comma-separated application types")
+    s.add_argument("--target", help="comma-separated build/run target ids")
     s.add_argument("--cargo-clean", choices=["on", "off"])
     s.add_argument("--version-milestones", choices=["on", "off"])
     s.set_defaults(func=cmd_init)
@@ -1109,6 +1406,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("run-hook")
     s.add_argument("name")
+    s.add_argument("--component", action="append", default=[], help="component id; repeat to select multiple components")
     s.set_defaults(func=cmd_run_hook)
 
     s = sub.add_parser("start-feature-branch")
@@ -1163,7 +1461,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_update_template)
 
     s = sub.add_parser("refresh-template-manifest")
-    s.add_argument("--version", default="0.4.0")
+    s.add_argument("--version", default="0.5.0")
     s.set_defaults(func=cmd_refresh_template_manifest)
 
     s = sub.add_parser("validate-docs")

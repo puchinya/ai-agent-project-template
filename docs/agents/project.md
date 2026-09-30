@@ -1,17 +1,25 @@
 # Project profile
 
-This file has not been initialized.
+- Project: `ai-agent-project-template`
+- Profile schema: `2`
+- Version milestones: disabled
 
-Run:
+## Components
 
-```bash
-scripts/agent/init-project.sh
-```
+| ID | Roots | Stacks | Application types | Targets (`runnable_on`) |
+|---|---|---|---|---|
+| `root` | `.` | `generic` | `generic` | None |
 
-or:
+## Branch-switch hook
 
-```powershell
-.\scripts\agent\init-project.ps1
-```
+- None
 
-Then review the generated `.agent/project.json` and this file.
+## Quick verification
+
+- None
+
+## Final verification
+
+- `python scripts/agent/agent_tool.py validate-docs`
+
+This file is generated from `.agent/project.json`. Edit the JSON when changing project execution policy, then keep this file synchronized.

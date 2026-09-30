@@ -8,6 +8,7 @@
 | technology and repository execution rules | `agents/` |
 | Issue phase workflow | `agent-workflow/` |
 | document quality requirements | `standards/` |
+| conditional checks for selected application types | [`standards/application-profiles/`](standards/application-profiles/README.md) |
 | document starting points | `templates/` |
 
 Dependency direction:

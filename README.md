@@ -43,12 +43,17 @@ gh auth login
 
 `init-project` は `Cargo.toml`, `package.json`, `pyproject.toml`, `requirements.txt`, `*.sln`, `*.csproj` などを見て技術スタックを検出し、`.agent/project.json` と `docs/agents/project.md` を生成します。
 
+schema 2では `component`（開発・検証単位）、`stack`（実装技術）、`application type`（追加の設計・仕様観点）、`target`（build/run対象）を別々に記録します。application typeは自動推論されません。省略時は `generic` になり、追加profileは適用されません。
+
 ```bash
 # auto-detect
 ./scripts/agent/init-project.sh
 
 # explicit mixed stack
 ./scripts/agent/init-project.sh --stack rust,node
+
+# application behavior and build/run targets
+./scripts/agent/init-project.sh --stack swift --application-type mobile,library --target ios-device,macos-arm64
 
 # Rustで実際にfeature branchへ切り替えた時だけ cargo clean
 ./scripts/agent/init-project.sh --stack rust --cargo-clean on
@@ -58,6 +63,8 @@ gh auth login
 ```
 
 初期化後は `.agent/project.json` と `docs/agents/project.md` をレビューしてコミットしてください。
+
+schema-2の `run-hook verify_quick` / `verify_final` はglobal hooks、component hooks、runtime hostで実行できるtarget hooksを順に実行します。`--component <id>` は繰り返し指定でき、省略すると全componentが選択されます。profileの詳細は [Project Profile and Agent Context Specification](docs/specs/project-profile-spec.md) を参照してください。
 
 ## Documentation model
 
