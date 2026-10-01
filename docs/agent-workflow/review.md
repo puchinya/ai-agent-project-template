@@ -57,6 +57,6 @@ After repository-changing remediation:
 
 Work is complete only when required reviews/checks pass, acceptance criteria are satisfied, required docs are synchronized, and the PR is merged.
 
-Verify Issue closure after merge, then run `finalize-merged-issue.* <issue> --pr <pr>` to remove remaining `phase:*` labels. The cleanup is idempotent.
+Verify Issue closure after merge, then run `finalize-merged-issue.* <issue> --pr <pr>` to remove only stale `phase:review`. Unexpected `phase:*` labels fail closed without mutation. Repeating the command after review-phase removal succeeds without mutation.
 
 Before requesting handoff, run `validate-public-review.* <issue> --pr <pr>` and `delivery-check.* <issue> --pr <pr> --stage handoff`. Reviewers independently inspect the diff, evidence, and Required Checks; self-review evidence is a navigation aid, not proof of test truth.

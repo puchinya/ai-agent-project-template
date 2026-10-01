@@ -62,6 +62,7 @@ This document owns the contract, public review-evidence, delivery-check, finaliz
 - A contract source comment MUST be one top-level comment on the owning Issue. Its first line MUST be `<!-- agent-contract:v1 issue=N sha256=HEX bytes=DECIMAL -->`, followed by one blank line and the exact UTF-8 payload bytes.
 - The SHA-256 and byte count MUST cover the original payload bytes exactly, including line endings and final newline. Publishing or restoring MUST NOT normalize, trim, or rewrite the payload.
 - Contract payloads MUST be non-empty, at most 64 KiB, valid UTF-8, and free of NUL bytes and obvious credential material.
+- Before any publish request, the fully rendered GitHub comment (version header, two newlines, and exact UTF-8 payload) MUST be at most 65,536 characters. This validation MUST be local, preserve the mirror, and reject without posting; the header makes the effective raw limit slightly lower for ASCII-heavy payloads. Payloads MUST NOT be truncated, split, normalized, or published as multiple comments.
 - Publish MUST validate the target Issue, create or reuse the matching top-level comment, retrieve that comment by its single ID, and verify its Issue, byte count, and SHA-256 before updating the Issue pointer. If pointer update fails after comment creation, the comment remains and a same-SHA retry MUST reuse it.
 - Publishing the same Issue and SHA MUST be idempotent. A different SHA MUST require `--supersede`; superseding MUST create a new comment and MUST NOT edit or delete the prior comment.
 - Restore MUST retrieve only the comment named by the Issue pointer through `GET /repos/{owner}/{repo}/issues/comments/{id}`. It MUST verify comment ownership, Issue association, payload length, and SHA before any mirror replacement. It MUST NOT list or fetch every Issue comment.
@@ -69,6 +70,7 @@ This document owns the contract, public review-evidence, delivery-check, finaliz
 - An Issue body update MUST re-read the body immediately before changing only the contract section and MUST read the result back. Concurrent Issue-body editing is unsupported and MUST be reported because GitHub does not provide a strict compare-and-swap update here.
 - `verify-implementation-contract` MUST validate the current pointer, named comment, and local mirror without fetching unrelated comments. Legacy local-only saved contracts remain readable.
 - Normal `agent-context` output MUST NOT fetch or inline contract comments; it MAY report the local mirror's SHA and status.
+- `agent-context` MUST request Issue state and derive `closed` before label-based phase routing. It MUST print `phase=closed` and an empty workflow for closed Issues. Checkpoint phase reporting MUST request Issue state; open Issues retain label-based routing.
 
 ### Self-review and delivery
 
@@ -82,12 +84,16 @@ This document owns the contract, public review-evidence, delivery-check, finaliz
   ```
 
 - The complete self-review MUST be one top-level PR conversation comment. The PR body section `## Self-review` MUST contain only the comment ID, SHA-256, and Reviewed HEAD.
+- The effective checklist MUST prefer a valid `AGENT_REVIEWER_CHECKLIST_V1` canonical block when present. Otherwise it MUST recognize only a `Reviewer Checklist` heading, optionally preceded by a numeric prefix such as `9.` and optionally followed by one ASCII- or Japanese-parenthesized qualifier; arbitrary headings that merely contain those words MUST NOT match.
+- Effective checklist entries MUST combine Contract items in source order as `C001` onward, followed by Issue items in source order as `I001` onward.
 - Self-review publication MUST first require the existing `validate-self-review` command to pass. It MUST then retrieve the named comment and independently verify its PR, SHA, Reviewed HEAD, and effective Reviewer Checklist.
 - A self-review is stale whenever the PR head differs from its Reviewed HEAD. A new commit requires a new review and publication.
 - Review evidence MUST identify concrete code, test, or CI evidence. Its format is not proof of truth; a reviewer in a separate session MUST verify the claims.
 - `delivery-check --stage handoff` MUST require: the PR and Issue are in the same repository and match the requested Issue; the PR is open and non-draft; the PR body contains `Closes #N`; the Issue is in `phase:review`; the PR head equals the published Reviewed HEAD; the published self-review comment, SHA, and effective checklist validate; verification and untested fields are filled; and every configured Required Check for the current head is green.
+- Handoff MUST schema-validate the project profile while accepting `initialized:false` for a distributed template starter. It MUST NOT initialize or rewrite that profile.
+- A Required Check with `app_id >= 0` MUST match a check-run from that exact GitHub App. `app_id == -1`, a missing app ID, or a legacy `contexts[]` entry is source-unrestricted and MAY be satisfied by a matching check-run name from any app or a matching commit-status context. An app-specific check MUST NOT be satisfied by a commit status. Completed check-run conclusions `success`, `skipped`, and `neutral` pass; commit-status contexts pass only with state `success`. Missing, pending, and failing checks fail closed.
 - `delivery-check --stage merged` MUST require a merged PR, a closed Issue, and no remaining phase label.
-- `finalize-merged-issue` MUST verify merged/closed state before removing a stale `phase:review` label. Repeated finalization MUST be safe.
+- `finalize-merged-issue` MUST verify merged/closed state before removing only a stale `phase:review` label. Any other `phase:*` label MUST fail closed without mutation. Repeated finalization after `phase:review` is gone MUST succeed without mutation.
 - A generic profile is legal. Initialization MUST warn when a component uses `generic`. A PR that affects a generic component MUST include a concrete `Generic profile rationale:` explaining why the reported verification is valid for that component.
 
 ### CI and trust boundary
@@ -124,8 +130,10 @@ An Issue may have no contract pointer or one pointer to its approved source comm
 | Issue body changed during pointer update | Stop and report conflict; preserve unrelated body sections. |
 | PR head changes after review publication | Report stale review and fail handoff until review is regenerated. |
 | Required Check absent, pending, or failed | Fail handoff; never convert the state to success. |
+| Rendered Implementation Contract comment exceeds 65,536 characters | Reject locally before remote mutation and preserve the local mirror. |
 | Draft PR metadata check | Keep Ready-only evidence pending; do not report handoff success. |
 | Merge finalization called before merged PR and closed Issue | Fail without changing phase labels. |
+| Merge finalization finds a phase label other than `phase:review` | Fail without changing any labels. |
 | Temporary file creation or API operation fails | Clean up temporary payloads and preserve existing mirror/pointer state where the operation has not completed. |
 
 ## Quality attributes
@@ -136,7 +144,7 @@ Contract and review payloads are sent only to the named repository Issue/PR. Log
 
 ### Performance and scalability
 
-Contract verification is bounded to one named comment and a maximum 64 KiB payload. Context generation MUST avoid comment-list APIs and full body output.
+Contract verification is bounded to one named comment and a maximum 64 KiB raw payload; publish also enforces the 65,536-character rendered-comment limit. Context generation MUST avoid comment-list APIs and full body output.
 
 ### Accessibility and usability
 

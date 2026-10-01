@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import tempfile
 import unittest
 from argparse import Namespace
@@ -15,6 +16,72 @@ PR = 7
 HEAD = "a" * 40
 CHECKLIST = "b" * 64
 ENTRIES = [("C01", "contract", "Preserve the approved workflow invariants")]
+
+
+class ChecklistExtractionTests(unittest.TestCase):
+    def test_original_contract_fixture_yields_nine_items_and_combines_with_issue_checklist(self):
+        fixture = Path(__file__).parent / "fixtures" / "issue-5-implementation-contract.md"
+        data = fixture.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            "f220ae532f45cffa2090dc926348067bd86cab354e406de3322eb1dfd050c908",
+        )
+        self.assertEqual(len(module.extract_markdown_checklist(data.decode("utf-8"))), 9)
+
+        issue_body = "## Reviewer Checklist\n\n" + "\n".join(
+            f"- [ ] Issue criterion {i}" for i in range(1, 9)
+        ) + "\n"
+        issue_data = {"body": issue_body}
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp)
+            contract_dir = state_root / str(ISSUE)
+            contract_dir.mkdir(parents=True)
+            (contract_dir / "implementation-contract.md").write_bytes(data)
+            (contract_dir / "implementation-contract.sha256").write_text(
+                hashlib.sha256(data).hexdigest() + "\n", encoding="utf-8"
+            )
+            with patch.object(module, "require"), \
+                 patch.object(module, "run", return_value=json.dumps(issue_data)), \
+                 patch.object(module, "STATE", state_root):
+                entries, _fingerprint = module.effective_checklist(ISSUE)
+        self.assertEqual([item_id for item_id, _source, _text in entries],
+                         [f"C{i:03d}" for i in range(1, 10)] + [f"I{i:03d}" for i in range(1, 9)])
+
+    def test_reviewer_checklist_heading_matcher_is_narrow_and_keeps_plain_heading(self):
+        for heading in (
+            "## Reviewer Checklist",
+            "## 9. Reviewer Checklist",
+            "## 9. Reviewer Checklist (approved)",
+            "## 9. Reviewer Checklist（実装前に承認）",
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(module.extract_markdown_checklist(f"{heading}\n\n- [ ] one\n"), ["one"])
+        for heading in ("## Notes on Reviewer Checklist", "## Reviewer Checklist notes", "## Reviewer Checklist 9"):
+            with self.subTest(heading=heading):
+                self.assertEqual(module.extract_markdown_checklist(f"{heading}\n\n- [ ] unrelated\n"), [])
+
+    def test_canonical_reviewer_block_takes_priority_over_markdown_heading(self):
+        contract = (
+            f"{module.CANONICAL_BEGIN}\nREVIEW_ITEM: Canonical item\n{module.CANONICAL_END}\n\n"
+            "## Reviewer Checklist\n\n- [ ] Markdown fallback\n"
+        ).encode("utf-8")
+        issue_body = "## Reviewer Checklist\n\n- [ ] Issue item\n"
+        with tempfile.TemporaryDirectory() as temp:
+            state_root = Path(temp)
+            issue_dir = state_root / str(ISSUE)
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "implementation-contract.md").write_bytes(contract)
+            (issue_dir / "implementation-contract.sha256").write_text(
+                hashlib.sha256(contract).hexdigest() + "\n", encoding="utf-8"
+            )
+            with patch.object(module, "require"), \
+                 patch.object(module, "run", return_value=json.dumps({"body": issue_body})), \
+                 patch.object(module, "STATE", state_root):
+                entries, _fingerprint = module.effective_checklist(ISSUE)
+        self.assertEqual(entries, [
+            ("C001", "contract", "Canonical item"),
+            ("I001", "issue", "Issue item"),
+        ])
 
 
 def review_text(*, checklist=CHECKLIST, head=HEAD, status="PASS", detail="Evidence: unit test output and committed diff"):
@@ -180,18 +247,60 @@ class DeliveryGateTests(unittest.TestCase):
         }
         def api(endpoint, **_kwargs):
             return responses[endpoint]
+        starter_profile = {"schema_version": 2, "initialized": False}
         with patch.object(module, "require"), patch.object(module, "current_repository", return_value=("example/template", "github.com")), \
              patch.object(module, "gh_api", side_effect=api), \
              patch.object(module, "cmd_validate_public_review"), \
              patch.object(module, "required_checks_green") as checks, \
-             patch.object(module, "load_config", return_value={}), \
+             patch.object(module, "load_config", return_value=starter_profile) as load_config, \
              patch.object(module, "context_profile_components", return_value=(2, affected or [{"application_types": ["cli"]}], ["root"])):
             module.cmd_delivery_check(Namespace(issue=ISSUE, pr=PR, stage="handoff"))
+        load_config.assert_called_once_with(require_initialized=False)
         return checks
 
     def test_valid_handoff_requires_phase_review_and_required_checks(self):
         checks = self._run_handoff(pull_request(), issue(), affected=[{"application_types": ["cli"]}])
         checks.assert_called_once_with("example/template", "main", HEAD)
+
+    def test_initialized_false_schema2_starter_passes_generic_handoff_without_rewrite(self):
+        starter = {
+            "schema_version": 2,
+            "initialized": False,
+            "project_name": "starter",
+            "components": [{
+                "id": "root",
+                "roots": ["."],
+                "stacks": ["generic"],
+                "application_types": ["generic"],
+                "targets": [],
+                "hooks": {"verify_quick": [], "verify_final": []},
+            }],
+            "branch": {"prefix": "feature", "max_slug_length": 48},
+            "milestones": {"enabled": False, "version_source": "auto"},
+            "hooks": {"branch_switch": [], "verify_quick": [], "verify_final": []},
+        }
+        body = pr_body().replace(
+            "Generic profile rationale: N/A",
+            "Generic profile rationale: this reusable template has no single product-specific runtime.",
+        )
+        responses = {
+            "repos/example/template/pulls/7": pull_request(body=body),
+            "repos/example/template/issues/5": issue(),
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "project.json"
+            config_path.write_text(json.dumps(starter), encoding="utf-8")
+            original = config_path.read_bytes()
+            def api(endpoint, **_kwargs):
+                return responses[endpoint]
+            with patch.object(module, "require"), \
+                 patch.object(module, "current_repository", return_value=("example/template", "github.com")), \
+                 patch.object(module, "gh_api", side_effect=api), \
+                 patch.object(module, "cmd_validate_public_review"), \
+                 patch.object(module, "required_checks_green"), \
+                 patch.object(module, "CONFIG", config_path):
+                module.cmd_delivery_check(Namespace(issue=ISSUE, pr=PR, stage="handoff"))
+            self.assertEqual(config_path.read_bytes(), original)
 
     def test_handoff_rejects_draft_closes_missing_and_wrong_phase(self):
         with self.assertRaises(SystemExit):
@@ -216,21 +325,43 @@ class DeliveryGateTests(unittest.TestCase):
             self._run_handoff(pull_request(body=pr_body(untested="...")), issue())
 
     def test_required_checks_must_be_configured_and_green(self):
-        def run_gate(check_runs, required):
+        def run_gate(check_runs, required, statuses=()):
             def api(endpoint, **_kwargs):
                 if "required_status_checks" in endpoint:
                     return required
                 if endpoint.endswith("check-runs?per_page=100"):
                     return {"check_runs": check_runs}
-                return {"statuses": []}
+                return {"statuses": list(statuses)}
             with patch.object(module, "gh_api", side_effect=api):
                 module.required_checks_green("example/template", "main", HEAD)
         with self.assertRaises(SystemExit):
             run_gate([], {"checks": [], "contexts": []})
-        for status, conclusion in [("queued", None), ("completed", "failure")]:
+        exact_app = {"checks": [{"context": "Template CI", "app_id": 5}]}
+        for status, conclusion in [("queued", None), ("completed", "failure"), ("completed", "cancelled")]:
             with self.subTest(status=status, conclusion=conclusion), self.assertRaises(SystemExit):
-                run_gate([{"name": "Template CI", "status": status, "conclusion": conclusion, "app": {"id": 5}}], {"checks": [{"context": "Template CI", "app_id": 5}]})
-        run_gate([{"name": "Template CI", "status": "completed", "conclusion": "success", "app": {"id": 5}}], {"checks": [{"context": "Template CI", "app_id": 5}]})
+                run_gate([{"name": "Template CI", "status": status, "conclusion": conclusion, "app": {"id": 5}}], exact_app)
+        run_gate([{"name": "Template CI", "status": "completed", "conclusion": "success", "app": {"id": 5}}], exact_app)
+        for conclusion in ("success", "skipped", "neutral"):
+            with self.subTest(conclusion=conclusion):
+                run_gate([{"name": "Template CI", "status": "completed", "conclusion": conclusion, "app": {"id": 5}}], exact_app)
+        with self.assertRaises(SystemExit):
+            run_gate([{"name": "Template CI", "status": "completed", "conclusion": "success", "app": {"id": 6}}], exact_app)
+        with self.assertRaises(SystemExit):
+            run_gate([
+                {"name": "Template CI", "status": "completed", "conclusion": "success", "started_at": "2026-01-01T00:00:00Z", "app": {"id": 5}},
+                {"name": "Template CI", "status": "in_progress", "conclusion": None, "started_at": "2026-01-02T00:00:00Z", "app": {"id": 5}},
+            ], exact_app)
+        with self.assertRaises(SystemExit):
+            run_gate([], exact_app, [{"context": "Template CI", "state": "success"}])
+        any_app = {"checks": [{"context": "Template CI", "app_id": -1}]}
+        run_gate([{"name": "Template CI", "status": "completed", "conclusion": "success", "app": {"id": 6}}], any_app)
+        run_gate([], {"checks": [], "contexts": ["Template CI"]}, [{"context": "Template CI", "state": "success"}])
+        with self.assertRaises(SystemExit):
+            run_gate([], {"checks": [], "contexts": ["Template CI"]}, [
+                {"context": "Template CI", "state": "success", "updated_at": "2026-01-01T00:00:00Z"},
+                {"context": "Template CI", "state": "pending", "updated_at": "2026-01-02T00:00:00Z"},
+            ])
+        run_gate([{"name": "Template CI", "status": "completed", "conclusion": "success", "app": {"id": 6}}], {"checks": [{"context": "Template CI"}]})
 
     def test_merged_issue_phase_label_cleanup_is_idempotent(self):
         state = {"labels": [{"name": "phase:review"}, {"name": "triage"}]}
@@ -248,6 +379,23 @@ class DeliveryGateTests(unittest.TestCase):
             module.cmd_finalize_merged_issue(Namespace(issue=ISSUE, pr=PR))
             module.cmd_finalize_merged_issue(Namespace(issue=ISSUE, pr=PR))
         self.assertEqual(state["labels"], [{"name": "triage"}])
+
+    def test_finalization_rejects_unexpected_phase_without_mutating_labels(self):
+        labels = [{"name": "phase:review"}, {"name": "phase:implementation"}, {"name": "triage"}]
+        calls = []
+        merged_pr = pull_request(state="closed", merged_at="2026-10-01T00:00:00Z")
+        def api(endpoint, *, method="GET", **_kwargs):
+            calls.append((endpoint, method))
+            if endpoint == "repos/example/template/pulls/7":
+                return merged_pr
+            if endpoint == "repos/example/template/issues/5":
+                return {"state": "closed", "labels": list(labels)}
+            raise AssertionError(f"unexpected API call {method} {endpoint}")
+        with patch.object(module, "require"), patch.object(module, "current_repository", return_value=("example/template", "github.com")), \
+             patch.object(module, "gh_api", side_effect=api), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            module.cmd_finalize_merged_issue(Namespace(issue=ISSUE, pr=PR))
+        self.assertEqual(labels, [{"name": "phase:review"}, {"name": "phase:implementation"}, {"name": "triage"}])
+        self.assertFalse(any(method == "DELETE" for _endpoint, method in calls))
 
 
 if __name__ == "__main__":

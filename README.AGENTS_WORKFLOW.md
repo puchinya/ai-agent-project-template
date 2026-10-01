@@ -172,6 +172,8 @@ CSV exportを追加して
 
 schema-2 profileで複数componentがある場合、Issueに `## Affected components` を設けて対象IDを列挙します。その後 `agent-context.sh <issue>` を実行し、選択されたapplication profileと関連するspec/design/status ownerだけを読みます。全standardsや全仕様書を一括で読み込みません。
 
+Issueがclosedなら、`agent-context` は残ったphase labelよりIssue stateを優先し、`phase=closed` とworkflowなしを返します。checkpoint/resumeのphase表示もIssue stateを取得します。
+
 ### Requirements phase
 
 目的は「実装方法を考えること」ではなく、「何を満たせば完了か」を明確にすることです。
@@ -252,7 +254,7 @@ PowerShell:
 
 ## 4. セルフレビュー
 
-`prepare-self-review` は Issue の `## Reviewer Checklist` と、存在する場合は保存済み Implementation Contract の checklist を統合し、次を生成します。
+`prepare-self-review` は Issue の `## Reviewer Checklist` と、存在する場合は保存済み Implementation Contract の checklist を統合し、次を生成します。Contractでは `## Reviewer Checklist`、`## 9. Reviewer Checklist`、および末尾にASCIIまたは日本語の括弧が付く見出しを認識します。canonical checklist blockがある場合はそちらを優先します。
 
 ```text
 .agent-state/issues/<issue>/
@@ -297,7 +299,9 @@ Reviewed-HEAD: <40 hex characters>
 Closes #<issue>
 ```
 
-まずDraft PRを作成してIssueを `phase:review` にし、ローカルSelf-reviewを公開します。本文を完成させたらPRをReadyにし、Required Checksの成功後に `delivery-check --stage handoff` を実行します。未設定・pending・失敗のRequired Checkは通過扱いになりません。Affected componentが `generic` の場合は、Generic profile rationaleに用途と採用理由を具体的に記載します。
+まずDraft PRを作成してIssueを `phase:review` にし、ローカルSelf-reviewを公開します。本文を完成させたらPRをReadyにし、Required Checksの成功後に `delivery-check --stage handoff` を実行します。未設定・pending・失敗のRequired Checkは通過扱いになりません。GitHub Appを指定したcheckはそのAppのcheck-runだけで満たせます。source-unrestrictedとlegacy contextは一致するcheck-runまたはcommit statusを使い、`success`/`skipped`/`neutral`のcheck-run conclusionと`success`のcommit statusを成功として扱います。Affected componentが `generic` の場合は、Generic profile rationaleに用途と採用理由を具体的に記載します。
+
+Contract公開時はraw payloadを64 KiB以内にし、version headerと空行を含むrendered comment全体も65,536文字以内にします。超過はPOST前に拒否され、切り詰めや分割はしません。merge後のfinalizeは `phase:review` だけを削除し、それ以外の `phase:*` があれば変更せず失敗します。
 
 レビュー修正でコードが変わった場合は:
 
@@ -345,7 +349,7 @@ checkpointは短く保ちます。思考過程、秘密情報、巨大ログは�
 .agent-state/issues/<issue>/implementation-contract.sha256
 ```
 
-Contractはworkflow bypassではありません。Issue ownership、既存spec/designとの整合、セルフレビューは引き続き必要です。
+Contractはworkflow bypassではありません。Issue ownership、既存spec/designとの整合、セルフレビューは引き続き必要です。raw payloadの上限は64 KiBですが、GitHubコメントではheaderと空行を加えた全体が65,536文字以内である必要があります。
 
 Issue本文はコメントID/SHA/approved状態だけを保持し、全文はそのIssueのトップレベルコメント一件に置きます。別端末では `restore-implementation-contract` でID指定取得し、SHA・Issue所属を検証してからミラーをatomicに復元します。異なるローカル版を置き換えるときは `--replace-stale` が必要で、旧bytesはSHA付きバックアップに残ります。通常のcontext取得ではコメント一覧も全文も取得しません。
 

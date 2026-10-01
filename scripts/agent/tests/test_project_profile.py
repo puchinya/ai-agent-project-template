@@ -381,7 +381,51 @@ class DocumentImpactRoutingTests(unittest.TestCase):
             "  - update existing: [profile spec](https://github.com/example/template/blob/main/docs/specs/project-profile-spec.md)\n"
             "  - create: `docs/design/future-design.md`\n"
         )
-        issue_json = {"number": 5, "labels": [{"name": "phase:implementation"}], "url": "https://github.com/example/template/issues/5", "body": body}
+        issue_json = {"number": 5, "state": "open", "labels": [{"name": "phase:review"}], "url": "https://github.com/example/template/issues/5", "body": body}
+        commands = []
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command[:3] == ["gh", "issue", "view"]:
+                return json.dumps(issue_json)
+            if command[:3] == ["git", "branch", "--show-current"]:
+                return "feature/5-test"
+            if command[:3] == ["git", "rev-parse", "HEAD"]:
+                return "a" * 40
+            if command[:3] == ["gh", "repo", "view"]:
+                return "main"
+            if command[:3] == ["git", "status", "--porcelain"]:
+                return ""
+            if command[:3] == ["gh", "pr", "list"]:
+                return "{}"
+            raise AssertionError(f"unexpected command: {command}")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = profile_v2()
+            config["initialized"] = False
+            config_path = root / "project.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            output = io.StringIO()
+            with patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), \
+                 patch.object(module, "CONFIG", config_path), patch.object(module, "load_config", wraps=module.load_config) as load_config, \
+                 patch.object(module, "STATE", root / "issues"), \
+                 patch.object(module, "runtime_host_label", return_value="macos/arm64"), contextlib.redirect_stdout(output):
+                module.cmd_context(Namespace(issue=5))
+        load_config.assert_called_once_with(require_initialized=False)
+        self.assertEqual(commands[0][-1], "number,labels,url,body,state")
+        self.assertIn("phase=phase:review", output.getvalue())
+        self.assertIn("workflow=docs/agent-workflow/review.md", output.getvalue())
+        self.assertIn("document_owner=docs/specs/project-profile-spec.md", output.getvalue())
+        self.assertIn("planned_owner=docs/design/future-design.md", output.getvalue())
+        self.assertFalse(any("comments" in str(command) for command in commands))
+
+    def test_closed_issue_context_uses_closed_phase_and_no_workflow(self):
+        issue_json = {
+            "number": 5,
+            "state": "closed",
+            "labels": [{"name": "phase:review"}],
+            "url": "https://github.com/example/template/issues/5",
+            "body": "## Affected components\n\n- `root`\n",
+        }
         commands = []
         def fake_run(command, **_kwargs):
             commands.append(command)
@@ -401,12 +445,36 @@ class DocumentImpactRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             output = io.StringIO()
             with patch.object(module, "require"), patch.object(module, "run", side_effect=fake_run), \
-                 patch.object(module, "load_config", return_value=profile_v2()), patch.object(module, "STATE", Path(temp)), \
+                 patch.object(module, "load_config", return_value=profile_v2()) as load_config, patch.object(module, "STATE", Path(temp)), \
                  patch.object(module, "runtime_host_label", return_value="macos/arm64"), contextlib.redirect_stdout(output):
                 module.cmd_context(Namespace(issue=5))
-        self.assertIn("document_owner=docs/specs/project-profile-spec.md", output.getvalue())
-        self.assertIn("planned_owner=docs/design/future-design.md", output.getvalue())
-        self.assertFalse(any("comments" in str(command) for command in commands))
+        load_config.assert_called_once_with(require_initialized=False)
+        self.assertEqual(commands[0][-1], "number,labels,url,body,state")
+        self.assertIn("phase=closed", output.getvalue())
+        self.assertIn("workflow=\n", output.getvalue())
+        self.assertEqual(module.extract_phase({"state": "closed", "labels": []}), "closed")
+
+    def test_checkpoint_requests_issue_state_and_records_closed_phase(self):
+        commands = []
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            if command == ["git", "branch", "--show-current"]:
+                return "feature/5-test"
+            if command == ["git", "rev-parse", "HEAD"]:
+                return "a" * 40
+            if command == ["git", "status", "--porcelain"]:
+                return ""
+            if command[:3] == ["gh", "issue", "view"]:
+                return json.dumps({"state": "closed", "labels": [{"name": "phase:review"}]})
+            raise AssertionError(f"unexpected command: {command}")
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(module, "require"), patch.object(module, "issue_exists"), patch.object(module, "ROOT", Path(temp)), patch.object(module, "STATE", Path(temp)), \
+                 patch.object(module, "run", side_effect=fake_run), contextlib.redirect_stdout(io.StringIO()):
+                module.cmd_checkpoint(Namespace(issue=5))
+            checkpoint = (Path(temp) / "5" / "checkpoint.md").read_text(encoding="utf-8")
+        self.assertIn('phase: "closed"', checkpoint)
+        issue_query = next(command for command in commands if command[:3] == ["gh", "issue", "view"])
+        self.assertEqual(issue_query[-1], "labels,state")
 
 class ProjectProfileDocumentationRuleTests(unittest.TestCase):
     def test_agents_does_not_require_the_generated_project_summary(self):

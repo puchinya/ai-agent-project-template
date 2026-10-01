@@ -92,6 +92,7 @@ RUNTIME_HOSTS = {"windows", "macos", "linux"}
 GLOBAL_HOOK_NAMES = {"branch_switch", "verify_quick", "verify_final"}
 VERIFICATION_HOOK_NAMES = {"verify_quick", "verify_final"}
 CONTRACT_MAX_BYTES = 64 * 1024
+CONTRACT_COMMENT_MAX_CHARS = 65_536
 
 def fail(message: str, code: int = 1) -> None:
     print(f"error: {message}", file=sys.stderr)
@@ -679,6 +680,8 @@ def cmd_milestone(args: argparse.Namespace) -> None:
     print(f"milestone_number={number}")
 
 def extract_phase(issue: dict[str, Any]) -> str:
+    if str(issue.get("state", "")).casefold() == "closed":
+        return "closed"
     labels = issue.get("labels", [])
     names = [x.get("name", "") for x in labels if isinstance(x, dict)]
     return next((n for n in names if n.startswith("phase:")), "")
@@ -831,7 +834,7 @@ def parse_document_impact(body: str, issue_url: str) -> tuple[list[str], list[st
 
 def cmd_context(args: argparse.Namespace) -> None:
     require("git", "gh")
-    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url,body"], capture=True))
+    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url,body,state"], capture=True))
     phase = extract_phase(issue_json)
     workflow = {
         "phase:requirements": "docs/agent-workflow/requirements.md",
@@ -857,7 +860,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             recorded = sha_path.read_text(encoding="utf-8").strip().split()[0] if sha_path.read_text(encoding="utf-8").strip() else ""
             if recorded == contract_sha:
                 contract_status = "ok"
-    cfg = load_config()
+    cfg = load_config(require_initialized=False)
     profile_schema, components, affected_ids = context_profile_components(cfg, issue_json.get("body", ""))
     print(f"issue={args.issue}")
     print(f"phase={phase}")
@@ -915,7 +918,12 @@ def extract_markdown_checklist(text: str) -> list[str]:
     items: list[str] = []
     active_level: int | None = None
     for line in lines:
-        m = re.match(r"^(#{1,6})\s+Reviewer Checklist\s*$", line, re.I)
+        m = re.match(
+            r"^(#{1,6})\s+(?:\d+\.\s*)?Reviewer Checklist"
+            r"(?:\s*(?:\([^()\n]*\)|（[^（）\n]*）))?\s*$",
+            line,
+            re.I,
+        )
         if m:
             active_level = len(m.group(1))
             continue
@@ -1326,6 +1334,9 @@ def cmd_publish_contract(args: argparse.Namespace) -> None:
     except OSError:
         fail("contract source file could not be read")
     sha = validate_contract_payload(data, args.issue)
+    comment_body = contract_comment_body(args.issue, data, sha)
+    if len(comment_body) > CONTRACT_COMMENT_MAX_CHARS:
+        fail("rendered contract comment exceeds GitHub's 65,536-character Issue-comment limit")
     issue_endpoint = f"repos/{repository}/issues/{args.issue}"
     issue = gh_api(issue_endpoint)
     if int(issue.get("number", 0)) != args.issue:
@@ -1371,7 +1382,7 @@ def cmd_publish_contract(args: argparse.Namespace) -> None:
         created = gh_api(
             f"repos/{repository}/issues/{args.issue}/comments",
             method="POST",
-            payload={"body": contract_comment_body(args.issue, data, sha)},
+            payload={"body": comment_body},
         )
         try:
             comment_id = int(created["id"])
@@ -1575,7 +1586,14 @@ def required_checks_green(repository: str, base_branch: str, head_sha: str) -> N
     protection = gh_api(f"repos/{repository}/branches/{quote(base_branch, safe='')}/protection/required_status_checks")
     expected: list[tuple[str, int | None]] = []
     for item in protection.get("checks", []) or []:
-        expected.append((str(item.get("context", "")), item.get("app_id")))
+        app_id = item.get("app_id")
+        if app_id is None or app_id == -1:
+            source = None
+        elif type(app_id) is int and app_id >= 0:
+            source = app_id
+        else:
+            fail(f"Required Check has invalid app_id for {item.get('context', '')}")
+        expected.append((str(item.get("context", "")), source))
     for context in protection.get("contexts", []) or []:
         expected.append((str(context), None))
     expected = list(dict.fromkeys(expected))
@@ -1583,17 +1601,39 @@ def required_checks_green(repository: str, base_branch: str, head_sha: str) -> N
         fail("branch protection has no valid Required Checks; delivery is fail-closed")
     checks = gh_api(f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100")
     statuses = gh_api(f"repos/{repository}/commits/{head_sha}/status")
-    state_by_context: dict[tuple[str, int | None], bool] = {}
-    for item in checks.get("check_runs", []) or []:
-        app_id = item.get("app", {}).get("id")
-        key = (str(item.get("name", "")), app_id if isinstance(app_id, int) else None)
-        green = item.get("status") == "completed" and item.get("conclusion") == "success"
-        state_by_context[key] = green
+    latest_check_runs: dict[tuple[str, int | None], tuple[str, int, bool]] = {}
+    for index, item in enumerate(checks.get("check_runs", []) or []):
+        app_id = (item.get("app") or {}).get("id")
+        context = str(item.get("name", ""))
+        green = item.get("status") == "completed" and item.get("conclusion") in {"success", "skipped", "neutral"}
+        source = app_id if type(app_id) is int and app_id >= 0 else None
+        timestamp = str(item.get("started_at") or item.get("created_at") or "")
+        key = (context, source)
+        candidate = (timestamp, index, green)
+        if key not in latest_check_runs or candidate[:2] >= latest_check_runs[key][:2]:
+            latest_check_runs[key] = candidate
+    check_states: dict[tuple[str, int], bool] = {}
+    unrestricted_check_states: dict[str, list[bool]] = {}
+    for (context, source), (_timestamp, _index, green) in latest_check_runs.items():
+        if source is not None:
+            check_states[(context, source)] = green
+        unrestricted_check_states.setdefault(context, []).append(green)
+    latest_statuses: dict[str, tuple[str, int, bool]] = {}
+    for index, item in enumerate(statuses.get("statuses", []) or []):
+        context = str(item.get("context", ""))
+        timestamp = str(item.get("updated_at") or item.get("created_at") or "")
+        candidate = (timestamp, index, item.get("state") == "success")
+        if context not in latest_statuses or candidate[:2] >= latest_statuses[context][:2]:
+            latest_statuses[context] = candidate
+    status_states = {context: result for context, (_timestamp, _index, result) in latest_statuses.items()}
+    not_green: list[str] = []
+    for context, app_id in expected:
         if app_id is None:
-            state_by_context[(key[0], None)] = green
-    for item in statuses.get("statuses", []) or []:
-        state_by_context[(str(item.get("context", "")), None)] = item.get("state") == "success"
-    not_green = [context for context, app_id in expected if not state_by_context.get((context, app_id), False)]
+            passing = any(unrestricted_check_states.get(context, [])) or status_states.get(context, False)
+        else:
+            passing = check_states.get((context, app_id), False)
+        if not passing:
+            not_green.append(context)
     if not_green:
         fail("Required Checks are missing, pending, or failing: " + ", ".join(not_green))
 
@@ -1637,7 +1677,7 @@ def cmd_delivery_check(args: argparse.Namespace) -> None:
     cmd_validate_public_review(argparse.Namespace(issue=args.issue, pr=args.pr, head=head_sha))
     if extract_phase(issue) != "phase:review":
         fail("Issue phase changed during handoff validation")
-    validate_generic_rationale(str(issue.get("body", "")), body, load_config())
+    validate_generic_rationale(str(issue.get("body", "")), body, load_config(require_initialized=False))
     required_checks_green(repository, str(pr.get("base", {}).get("ref", "")), head_sha)
     print(f"delivery_check=handoff_pass head={head_sha}")
 
@@ -1653,8 +1693,11 @@ def cmd_finalize_merged_issue(args: argparse.Namespace) -> None:
     if issue.get("state") != "closed":
         fail("cannot finalize Issue labels while the Issue remains open")
     phase_labels = [str(label.get("name", "")) for label in issue.get("labels", []) if str(label.get("name", "")).startswith("phase:")]
-    for label in phase_labels:
-        gh_api(f"{issue_endpoint}/labels/{quote(label, safe='')}", method="DELETE")
+    unexpected = [label for label in phase_labels if label != "phase:review"]
+    if unexpected:
+        fail("cannot finalize Issue labels with unexpected phase label(s): " + ", ".join(unexpected))
+    if "phase:review" in phase_labels:
+        gh_api(f"{issue_endpoint}/labels/{quote('phase:review', safe='')}", method="DELETE")
     remaining = gh_api(issue_endpoint)
     if any(str(label.get("name", "")).startswith("phase:") for label in remaining.get("labels", [])):
         fail("phase label cleanup readback failed")
@@ -1668,7 +1711,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
     branch = run(["git", "branch", "--show-current"], capture=True)
     head = run(["git", "rev-parse", "HEAD"], capture=True)
     status = run(["git", "status", "--porcelain"], capture=True)
-    issue = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "labels"], capture=True))
+    issue = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "labels,state"], capture=True))
     phase = extract_phase(issue)
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     body = ""

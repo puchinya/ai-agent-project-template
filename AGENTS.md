@@ -99,6 +99,8 @@ Use `scripts/agent/agent-context.* <issue>` to produce a compact routing manifes
 
 `agent-context` may print `document_owner` and `planned_owner` paths from the Issue's `## Document impact`. Only direct Markdown files under `docs/specs/`, `docs/design/`, and `docs/status/` in the same repository are accepted; ambiguous or foreign links are diagnostics. It never fetches contract comments or expands their text.
 
+Closed Issues report `phase=closed` from Issue state with no active workflow path, even if a stale phase label remains.
+
 Prefer bounded search/ranges/diffs. Do not scan all docs, repeatedly reread unchanged large files, or paste full logs into active context. Put retained raw logs under `.agent-state/issues/<issue>/logs/`.
 
 ## Branch and technology hooks
@@ -151,7 +153,7 @@ Before implementation-phase completion is reported:
 - Issue is in `phase:review`;
 - `docs/agent-workflow/review.md` has been entered.
 
-Create the PR as Draft, move the Issue to `phase:review`, publish the validated Self-review, then mark the PR ready after the PR body is complete. Overall Issue completion remains merge-gated. After merge and Issue closure, use `finalize-merged-issue.*`; it removes remaining `phase:*` labels idempotently.
+Create the PR as Draft, move the Issue to `phase:review`, publish the validated Self-review, then mark the PR ready after the PR body is complete. Overall Issue completion remains merge-gated. After merge and Issue closure, use `finalize-merged-issue.*`; it removes only stale `phase:review`, fails without mutation if another `phase:*` label remains, and is idempotent after cleanup.
 
 Hooks are arbitrary shell commands configured in the trusted `.agent/project.json`. They are not sandboxed. CI must validate PR metadata and project-independent template fixtures in read-only jobs; never run PR-supplied hooks with secrets or write permissions.
 

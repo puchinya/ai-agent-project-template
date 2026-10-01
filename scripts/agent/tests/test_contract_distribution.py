@@ -25,6 +25,7 @@ class ContractDistributionTests(unittest.TestCase):
         self.assertEqual(decoded, data)
         self.assertEqual(actual_sha, sha)
         self.assertTrue(decoded.endswith(b"\r\n"))
+        self.assertLessEqual(len(body), module.CONTRACT_COMMENT_MAX_CHARS)
 
     def test_contract_comment_rejects_tampering_and_wrong_issue(self):
         data = b"# approved contract\n"
@@ -44,6 +45,28 @@ class ContractDistributionTests(unittest.TestCase):
         for payload in [b"", b"\xff", b"a\x00b", b"token=ghp_" + b"A" * 24, b"x" * (module.CONTRACT_MAX_BYTES + 1)]:
             with self.subTest(payload_len=len(payload)), self.assertRaises(SystemExit):
                 module.validate_contract_payload(payload, 1)
+
+    def test_oversized_rendered_comment_is_rejected_before_remote_or_mirror_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "oversized.md"
+            source.write_bytes(b"x" * module.CONTRACT_MAX_BYTES)
+            state = root / "issues"
+            issue_dir = state / "5"
+            original = b"# existing exact mirror\r\n"
+            module.write_contract_mirror(issue_dir, original)
+            calls = []
+            with patch.object(module, "require"), \
+                 patch.object(module, "current_repository", return_value=("example/template", "github.com")), \
+                 patch.object(module, "gh_api", side_effect=lambda *args, **kwargs: calls.append((args, kwargs))), \
+                 patch.object(module, "STATE", state), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                module.cmd_publish_contract(Namespace(issue=5, source=source, supersede=False))
+            self.assertEqual(calls, [])
+            self.assertEqual((issue_dir / "implementation-contract.md").read_bytes(), original)
+            self.assertEqual(
+                (issue_dir / "implementation-contract.sha256").read_text(encoding="utf-8").strip().split()[0],
+                hashlib.sha256(original).hexdigest(),
+            )
 
     def test_local_mirror_collision_is_non_mutating_and_replace_keeps_sha_backup(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -85,15 +85,15 @@ The Issue and PR bodies hold compact pointers. The named comment holds each comp
 
 ### Self-review and delivery
 
-1. Self-review publication first runs `validate-self-review` against the current HEAD and effective checklist.
+1. Checklist extraction prefers the canonical reviewer block. Without one, a narrow heading matcher accepts `Reviewer Checklist`, an optional numeric prefix, and an optional ASCII or Japanese parenthetical qualifier; unrelated headings do not match. Self-review publication first runs `validate-self-review` against the current HEAD and effective checklist.
 2. Publish the full review as one PR conversation comment. Verify the named comment's PR, SHA, checklist, and Reviewed HEAD before changing the PR pointer.
 3. Validation fetches the named comment only. It compares the PR's current head to Reviewed HEAD and returns stale when they differ.
-4. Handoff reads repository identity, PR draft/open state, `Closes #N`, Issue phase, current PR head, review pointer, verification/untested fields, and every configured Required Check.
-5. Merged delivery additionally requires a merged PR and closed Issue. Finalization removes stale phase labels only after these live conditions pass and is safe to repeat.
+4. Handoff reads repository identity, PR draft/open state, `Closes #N`, Issue phase, current PR head, review pointer, verification/untested fields, and every configured Required Check. It validates the project profile schema with initialization not required, preserving the checked-in template starter. App-specific requirements match only that app's check-run; source-unrestricted and legacy contexts match a passing check-run by name or a successful commit status. Check-run conclusions `success`, `skipped`, and `neutral` pass; commit statuses require `success`.
+5. Merged delivery additionally requires a merged PR and closed Issue. Finalization removes only stale `phase:review`; any other phase label stops cleanup without mutation. Repeating cleanup after review-phase removal succeeds without mutation.
 
 ### Context and verification composition
 
-The context path fetches Issue number, labels, URL, and body once, resolves affected components from the canonical section, and then resolves only explicit same-repository paths in `## Document impact`. Existing owners are displayed as `document_owner=<repo-relative-path>`; future paths are displayed as `planned_owner=<repo-relative-path>`. A URL that cannot be proven to identify an in-scope path in the current repository produces a diagnostic and is not emitted as an owner.
+The context path fetches Issue number, state, labels, URL, and body once, resolves `closed` from Issue state before label-based phase routing, then resolves affected components from the canonical section and only explicit same-repository paths in `## Document impact`. Closed Issues report `phase=closed` with no workflow path. Existing owners are displayed as `document_owner=<repo-relative-path>`; future paths are displayed as `planned_owner=<repo-relative-path>`. A URL that cannot be proven to identify an in-scope path in the current repository produces a diagnostic and is not emitted as an owner.
 
 The verification path selects Issue-affected components for Quick checks and all components by default for Final checks. For each target, it checks OS, normalized architecture, required PATH tools, then explicitly supplied capabilities. The first mismatch skips the target command and records it as unverified; all other eligible hooks retain their configured sequential order.
 
@@ -126,7 +126,7 @@ GitHub authentication remains inside the configured `gh` credential boundary. CL
 
 ### Performance and resource strategy
 
-The codec caps payloads at 64 KiB and verifies one comment per pointer operation. The Issue and PR body remain compact; context generation emits only paths and diagnostics.
+The codec caps raw payloads at 64 KiB and checks the rendered comment against GitHub's 65,536-character limit before posting. The version header counts toward that limit, so the effective raw maximum is slightly lower for ASCII-heavy content. The Issue and PR body remain compact; context generation emits only paths and diagnostics.
 
 ### Observability, diagnostics, and supportability
 

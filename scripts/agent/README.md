@@ -23,7 +23,7 @@ restore-implementation-contract <issue> [--replace-stale]
 verify-implementation-contract <issue>
 ```
 
-Publish reads and writes one known comment ID at a time. Contract text is sent in a temporary JSON file, bounded to 64 KiB, checked for UTF-8, NUL bytes, and obvious credentials, then verified by bytes and SHA-256. Do not paste the full text into normal Issue/PR context or fetch comment lists.
+Publish reads and writes one known comment ID at a time. Contract text is sent in a temporary JSON file, bounded to 64 KiB raw, checked for UTF-8, NUL bytes, and obvious credentials, then verified by bytes and SHA-256. Before any POST, the rendered comment including its version header must also fit within GitHub's 65,536-character limit; the header makes the effective raw maximum slightly lower for ASCII-heavy payloads. Oversized rendered comments are rejected without remote mutation or mirror changes. Do not paste the full text into normal Issue/PR context or fetch comment lists.
 
 ```text
 publish-self-review <issue> --pr <number>
@@ -32,7 +32,7 @@ delivery-check <issue> --pr <number> --stage handoff|merged
 finalize-merged-issue <issue> --pr <number>
 ```
 
-The PR body points to one public Self-review comment. Handoff requires an open, ready PR, `Closes #<issue>`, `phase:review`, complete Verification and Untested fields, valid public review for the PR HEAD, and configured green Required Checks. A `generic` affected component also requires a concrete Generic profile rationale. After merge and Issue closure, finalization removes stale `phase:*` labels idempotently.
+The PR body points to one public Self-review comment. Handoff requires an open, ready PR, `Closes #<issue>`, `phase:review`, complete Verification and Untested fields, valid public review for the PR HEAD, and configured green Required Checks. App-specific checks must come from the configured app; unrestricted and legacy contexts can pass from a matching successful check-run or commit status. `success`, `skipped`, and `neutral` check-run conclusions pass; commit statuses require `success`. A `generic` affected component also requires a concrete Generic profile rationale. After merge and Issue closure, finalization removes only stale `phase:review`, fails without mutation on any other phase label, and is idempotent after cleanup.
 
 ## Document validation
 
