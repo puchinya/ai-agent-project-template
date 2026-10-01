@@ -17,12 +17,16 @@ import unicodedata
 from datetime import datetime
 import platform
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / ".agent" / "project.json"
 STATE = ROOT / ".agent-state" / "issues"
+
+def repo_relative(path: Path) -> str:
+    return path.relative_to(ROOT).as_posix()
+
 SPEC_REQUIRED_V1 = [
     "Purpose",
     "Scope",
@@ -87,6 +91,8 @@ APPLICATION_TYPES = {"generic", "desktop-gui", "cli", "mobile", "server", "embed
 RUNTIME_HOSTS = {"windows", "macos", "linux"}
 GLOBAL_HOOK_NAMES = {"branch_switch", "verify_quick", "verify_final"}
 VERIFICATION_HOOK_NAMES = {"verify_quick", "verify_final"}
+CONTRACT_MAX_BYTES = 64 * 1024
+CONTRACT_COMMENT_MAX_CHARS = 65_536
 
 def fail(message: str, code: int = 1) -> None:
     print(f"error: {message}", file=sys.stderr)
@@ -227,6 +233,12 @@ def validate_profile_v2(data: dict[str, Any]) -> dict[str, Any]:
             invalid_hosts = sorted(set(runnable_on) - (RUNTIME_HOSTS | {"any"}))
             if invalid_hosts:
                 fail(f"invalid schema-2 project profile: invalid runnable_on value(s): {', '.join(invalid_hosts)}")
+            if "requirements" in target:
+                requirements = object_field(target["requirements"], f"{target_name}.requirements")
+                for requirement_name in ("architectures", "tools", "capabilities"):
+                    if requirement_name not in requirements:
+                        fail(f"invalid schema-2 project profile: {target_name}.requirements.{requirement_name} is required")
+                    string_list(requirements[requirement_name], f"{target_name}.requirements.{requirement_name}")
             validate_hooks(target.get("hooks"), f"{target_name}.hooks", VERIFICATION_HOOK_NAMES)
     return data
 
@@ -313,6 +325,32 @@ def runtime_host() -> str:
 def runtime_host_label() -> str:
     return f"{runtime_host()}/{platform.machine() or 'unknown'}"
 
+def normalize_architecture(value: str | None = None) -> str:
+    machine = (value if value is not None else platform.machine()) or "unknown"
+    normalized = machine.casefold()
+    return {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+    }.get(normalized, normalized)
+
+def target_skip_reason(target: dict[str, Any], capabilities: set[str]) -> str | None:
+    runnable_on = target["runnable_on"]
+    if "any" not in runnable_on and runtime_host() not in runnable_on:
+        return "host_mismatch"
+    requirements = target.get("requirements")
+    if not requirements:
+        return None
+    architectures = {normalize_architecture(item) for item in requirements["architectures"]}
+    if architectures and normalize_architecture() not in architectures:
+        return "architecture_mismatch"
+    if any(shutil.which(tool) is None for tool in requirements["tools"]):
+        return "missing_tool"
+    if not set(requirements["capabilities"]).issubset(capabilities):
+        return "missing_capability"
+    return None
+
 def merge_gitignore(stacks: list[str]) -> None:
     path = ROOT / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -381,6 +419,8 @@ def cmd_init(args: argparse.Namespace) -> None:
     }
     validate_profile_v2(data)
     save_config(data)
+    if "generic" in application_types:
+        print("warning: generic application type requires a concrete Generic profile rationale in PRs", file=sys.stderr)
     merge_gitignore(stacks)
     project_md = ROOT / "docs" / "agents" / "project.md"
     project_md.parent.mkdir(parents=True, exist_ok=True)
@@ -454,20 +494,36 @@ def cmd_setup_github(args: argparse.Namespace) -> None:
 
 def cmd_run_hook(args: argparse.Namespace) -> None:
     cfg = load_config()
+    requested = getattr(args, "component", None) or []
+    issue_number = getattr(args, "issue", None)
+    capabilities = getattr(args, "capability", None) or []
+    if any(not isinstance(value, str) or not value.strip() for value in capabilities):
+        fail("--capability values must be non-empty IDs")
     if cfg.get("schema_version") == 2:
         if args.name not in GLOBAL_HOOK_NAMES:
             fail(f"unknown hook: {args.name}")
         if args.name == "branch_switch":
-            if getattr(args, "component", None):
-                fail("--component only applies to verification hooks")
+            if requested or issue_number is not None or capabilities:
+                fail("component, issue, and capability selectors only apply to verification hooks")
             commands = cfg["hooks"].get(args.name, [])
             for command in commands:
                 shell(command)
             print(f"hook={args.name} commands={len(commands)}")
             return
 
+        if issue_number is not None:
+            if args.name != "verify_quick":
+                fail("--issue only applies to verify_quick")
+            if requested:
+                fail("--issue cannot be combined with --component")
+            require("gh")
+            issue_json = json.loads(run(["gh", "issue", "view", str(issue_number), "--json", "body"], capture=True))
+            profile_schema, _issue_components, issue_component_ids = context_profile_components(cfg, issue_json.get("body", ""))
+            if profile_schema != 2:
+                fail("--issue component selection requires a schema-2 project profile")
+            requested = issue_component_ids
+
         components = cfg["components"]
-        requested = getattr(args, "component", None) or []
         known_ids = {component["id"] for component in components}
         unknown = [component_id for component_id in requested if component_id not in known_ids]
         if unknown:
@@ -485,15 +541,15 @@ def cmd_run_hook(args: argparse.Namespace) -> None:
                 target_commands = target["hooks"].get(args.name, [])
                 if not target_commands:
                     continue
-                runnable_on = target["runnable_on"]
-                if "any" in runnable_on or runtime_host() in runnable_on:
+                reason = target_skip_reason(target, set(capabilities))
+                if reason is None:
                     for command in target_commands:
                         steps.append(("command", command))
                 else:
                     steps.append((
                         "diagnostic",
                         "SKIPPED_TARGET_VERIFICATION "
-                        f"component={component['id']} target={target['id']} reason=host_mismatch",
+                        f"component={component['id']} target={target['id']} reason={reason}",
                     ))
         executed = 0
         for kind, value in steps:
@@ -508,8 +564,12 @@ def cmd_run_hook(args: argparse.Namespace) -> None:
     hooks = cfg.get("hooks", {})
     if args.name not in hooks:
         fail(f"unknown hook: {args.name}")
-    if getattr(args, "component", None):
+    if requested:
         fail("--component is only supported by schema-2 project profiles")
+    if issue_number is not None:
+        fail("--issue is only supported by schema-2 project profiles")
+    if capabilities:
+        fail("--capability is only supported by schema-2 project profiles")
     commands = hooks.get(args.name) or []
     if not commands:
         print(f"hook={args.name} commands=0")
@@ -620,6 +680,8 @@ def cmd_milestone(args: argparse.Namespace) -> None:
     print(f"milestone_number={number}")
 
 def extract_phase(issue: dict[str, Any]) -> str:
+    if str(issue.get("state", "")).casefold() == "closed":
+        return "closed"
     labels = issue.get("labels", [])
     names = [x.get("name", "") for x in labels if isinstance(x, dict)]
     return next((n for n in names if n.startswith("phase:")), "")
@@ -675,9 +737,104 @@ def context_profile_components(cfg: dict[str, Any], issue_body: str) -> tuple[in
     selected_ids = [component["id"] for component in components if component["id"] in set(requested)]
     return schema, [component_by_id[item] for item in selected_ids], selected_ids
 
+def allowed_document_owner_path(path: str, *, require_existing: bool) -> bool:
+    if not re.fullmatch(r"docs/(?:specs|design|status)/[^/]+\.md", path):
+        return False
+    if "\\" in path or any(part in {"", ".", ".."} for part in path.split("/")):
+        return False
+    resolved = (ROOT / path).resolve()
+    try:
+        resolved.relative_to(ROOT.resolve())
+    except ValueError:
+        return False
+    return resolved.is_file() if require_existing else True
+
+def issue_repository_url(issue_url: str) -> tuple[str, str, str] | None:
+    parsed = urlsplit(issue_url)
+    parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or len(parts) < 4 or parts[-2] not in {"issues", "pull"}:
+        return None
+    owner_repo = "/".join(parts[:2])
+    repo_prefix = "/" + "/".join(parts[:2])
+    return parsed.netloc.casefold(), owner_repo.casefold(), repo_prefix
+
+def document_path_from_link(target: str, issue_url: str) -> tuple[str | None, str | None]:
+    target = target.strip().strip("<>")
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        issue_identity = issue_repository_url(issue_url)
+        if not issue_identity:
+            return None, "ambiguous_url"
+        host, owner_repo, repo_prefix = issue_identity
+        if parsed.scheme not in {"http", "https"} or parsed.netloc.casefold() != host:
+            return None, "foreign_repository"
+        url_parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if len(url_parts) < 5 or "/".join(url_parts[:2]).casefold() != owner_repo:
+            return None, "foreign_repository"
+        decoded_path = "/" + "/".join(url_parts)
+        if not decoded_path.startswith(repo_prefix + "/blob/"):
+            return None, "ambiguous_url"
+        match = re.search(r"/blob/.+?/(docs/(?:specs|design|status)/[^/]+\.md)$", decoded_path)
+        if not match:
+            return None, "ambiguous_url"
+        path = match.group(1)
+    else:
+        path = unquote(parsed.path)
+    if not allowed_document_owner_path(path, require_existing=True):
+        return None, "missing_or_out_of_scope_owner"
+    return path, None
+
+def parse_document_impact(body: str, issue_url: str) -> tuple[list[str], list[str], list[str]]:
+    lines = markdown_without_fences(body).splitlines()
+    headings = [
+        index for index, line in enumerate(lines)
+        if re.fullmatch(r"##\s+Document impact\s*#*\s*", line.strip(), re.I)
+    ]
+    if not headings:
+        return [], [], []
+    diagnostics: list[str] = []
+    if len(headings) != 1:
+        return [], [], ["document_impact_diagnostic=reason=duplicate_section"]
+    start = headings[0] + 1
+    end = len(lines)
+    for index in range(start, len(lines)):
+        if re.match(r"^#{1,6}\s+", lines[index]):
+            end = index
+            break
+    existing: list[str] = []
+    planned: list[str] = []
+    for index, line in enumerate(lines[start:end], start=start + 1):
+        existing_match = re.match(r"^\s*-\s*update existing\s*:\s*(.*)$", line, re.I)
+        planned_match = re.match(r"^\s*-\s*(?:create|update/create)\s*:\s*(.*)$", line, re.I)
+        if existing_match:
+            links = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", existing_match.group(1))
+            if len(links) != 1:
+                diagnostics.append(f"document_impact_diagnostic=line={index} reason=ambiguous_owner_link")
+                continue
+            path, reason = document_path_from_link(links[0][1], issue_url)
+            if reason:
+                diagnostics.append(f"document_impact_diagnostic=line={index} reason={reason}")
+            elif path:
+                existing.append(path)
+        elif planned_match:
+            raw = planned_match.group(1).strip()
+            inline = re.match(r"`([^`]+)`", raw)
+            if not inline:
+                diagnostics.append(f"document_impact_diagnostic=line={index} reason=ambiguous_planned_path")
+                continue
+            path = inline.group(1)
+            if not allowed_document_owner_path(path, require_existing=False):
+                diagnostics.append(f"document_impact_diagnostic=line={index} reason=invalid_planned_path")
+                continue
+            if planned_match.group(0).lower().lstrip().startswith("- update/create"):
+                (existing if allowed_document_owner_path(path, require_existing=True) else planned).append(path)
+            else:
+                planned.append(path)
+    return list(dict.fromkeys(existing)), list(dict.fromkeys(planned)), diagnostics
+
 def cmd_context(args: argparse.Namespace) -> None:
     require("git", "gh")
-    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url,body"], capture=True))
+    issue_json = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "number,labels,url,body,state"], capture=True))
     phase = extract_phase(issue_json)
     workflow = {
         "phase:requirements": "docs/agent-workflow/requirements.md",
@@ -703,7 +860,7 @@ def cmd_context(args: argparse.Namespace) -> None:
             recorded = sha_path.read_text(encoding="utf-8").strip().split()[0] if sha_path.read_text(encoding="utf-8").strip() else ""
             if recorded == contract_sha:
                 contract_status = "ok"
-    cfg = load_config()
+    cfg = load_config(require_initialized=False)
     profile_schema, components, affected_ids = context_profile_components(cfg, issue_json.get("body", ""))
     print(f"issue={args.issue}")
     print(f"phase={phase}")
@@ -732,6 +889,16 @@ def cmd_context(args: argparse.Namespace) -> None:
     })
     for application_type in profile_types:
         print(f"application_profile=docs/standards/application-profiles/{application_type}.md")
+    owner_paths, planned_paths, diagnostics = parse_document_impact(
+        issue_json.get("body", ""),
+        issue_json.get("url", ""),
+    )
+    for path in owner_paths:
+        print(f"document_owner={path}")
+    for path in planned_paths:
+        print(f"planned_owner={path}")
+    for diagnostic in diagnostics:
+        print(diagnostic)
 
 def state_dir(issue: int) -> Path:
     p = STATE / str(issue)
@@ -751,7 +918,12 @@ def extract_markdown_checklist(text: str) -> list[str]:
     items: list[str] = []
     active_level: int | None = None
     for line in lines:
-        m = re.match(r"^(#{1,6})\s+Reviewer Checklist\s*$", line, re.I)
+        m = re.match(
+            r"^(#{1,6})\s+(?:\d+\.\s*)?Reviewer Checklist"
+            r"(?:\s*(?:\([^()\n]*\)|（[^（）\n]*）))?\s*$",
+            line,
+            re.I,
+        )
         if m:
             active_level = len(m.group(1))
             continue
@@ -854,9 +1026,9 @@ def cmd_prepare_review(args: argparse.Namespace) -> None:
             "\n".join(f"- {i} | PENDING |" for i, _s, _t in entries) + "\n",
             encoding="utf-8"
         )
-    print(f"review_checklist_path={checklist.relative_to(ROOT)}")
+    print(f"review_checklist_path={repo_relative(checklist)}")
     print(f"review_checklist_sha256={fingerprint}")
-    print(f"self_review_path={review.relative_to(ROOT)}")
+    print(f"self_review_path={repo_relative(review)}")
     print(f"checklist_changed={1 if changed else 0}")
 
 def cmd_validate_review(args: argparse.Namespace) -> None:
@@ -928,25 +1100,608 @@ def cmd_save_contract(args: argparse.Namespace) -> None:
     require("gh")
     issue_exists(args.issue)
     base = state_dir(args.issue)
-    dest = base / "implementation-contract.md"
-    sha_path = base / "implementation-contract.sha256"
     if args.path:
         data = Path(args.path).read_bytes()
     else:
         data = sys.stdin.buffer.read()
+    sha = validate_contract_payload(data, args.issue)
+    write_contract_mirror(base, data)
+    dest = base / "implementation-contract.md"
+    print(f"contract_path={repo_relative(dest)}")
+    print(f"contract_sha256={sha}")
+
+def validate_contract_payload(data: bytes, issue: int) -> str:
     if not data:
         fail("contract input is empty")
+    if len(data) > CONTRACT_MAX_BYTES:
+        fail("contract input exceeds the 64 KiB limit")
+    if b"\x00" in data:
+        fail("contract input contains a NUL byte")
     try:
-        data.decode("utf-8")
+        text = data.decode("utf-8")
     except UnicodeDecodeError:
         fail("contract input must be UTF-8")
-    sha = hashlib.sha256(data).hexdigest()
-    if dest.exists() and hashlib.sha256(dest.read_bytes()).hexdigest() != sha:
-        fail("immutable contract mirror already exists with different content")
-    dest.write_bytes(data)
-    sha_path.write_text(f"{sha}  implementation-contract.md\n", encoding="utf-8")
-    print(f"contract_path={dest.relative_to(ROOT)}")
-    print(f"contract_sha256={sha}")
+    credential_patterns = (
+        r"(?i)\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|AKIA[A-Z0-9]{16})\b",
+        r"(?im)\b(?:password|token|api[_-]?key|client[_-]?secret)\s*[:=]\s*[^\s]{8,}",
+        r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    )
+    if any(re.search(pattern, text) for pattern in credential_patterns):
+        fail("contract input contains obvious credential material")
+    return hashlib.sha256(data).hexdigest()
+
+def gh_api(endpoint: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    require("gh")
+    command = ["gh", "api", endpoint]
+    temp_path: Path | None = None
+    if method != "GET":
+        command += ["--method", method]
+        if payload is not None:
+            handle = tempfile.NamedTemporaryFile(prefix="agent-api-", suffix=".json", dir=ROOT, delete=False)
+            temp_path = Path(handle.name)
+            try:
+                handle.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            finally:
+                handle.close()
+            command += ["--input", str(temp_path)]
+    try:
+        try:
+            result = run(command, capture=True)
+        except subprocess.CalledProcessError as exc:
+            detail = str(getattr(exc, "stderr", "") or getattr(exc, "output", "") or "")
+            code = re.search(r"\b(403|404)\b", detail)
+            if code:
+                fail(f"GitHub API {code.group(1)} for {method} {endpoint}")
+            fail(f"GitHub API request failed for {method} {endpoint}")
+        if not result:
+            return None
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            fail(f"GitHub API returned invalid JSON for {method} {endpoint}")
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+def current_repository() -> tuple[str, str]:
+    require("gh")
+    try:
+        info = json.loads(run(["gh", "repo", "view", "--json", "nameWithOwner,url"], capture=True))
+        name = info["nameWithOwner"]
+        url = info["url"]
+    except (KeyError, json.JSONDecodeError, subprocess.CalledProcessError):
+        fail("could not determine the current GitHub repository")
+    if not re.fullmatch(r"[^/\s]+/[^/\s]+", name) or not urlsplit(url).netloc:
+        fail("current GitHub repository identity is invalid")
+    return name, urlsplit(url).netloc
+
+def replace_markdown_section(body: str, title: str, section: str) -> str:
+    heading = re.compile(rf"(?m)^##\s+{re.escape(title)}[ \t]*$")
+    matches = list(heading.finditer(body))
+    if len(matches) > 1:
+        fail(f"body contains duplicate '## {title}' sections")
+    replacement = section.rstrip("\n") + "\n\n"
+    if not matches:
+        prefix = body
+        if prefix and not prefix.endswith("\n\n"):
+            prefix += "\n" if prefix.endswith("\n") else "\n\n"
+        return prefix + replacement.rstrip("\n") + "\n"
+    start = matches[0].start()
+    next_heading = re.search(r"(?m)^##\s+", body[matches[0].end():])
+    end = matches[0].end() + next_heading.start() if next_heading else len(body)
+    return body[:start] + replacement + body[end:]
+
+def parse_body_metadata(body: str, title: str, required: set[str]) -> dict[str, str] | None:
+    heading = re.compile(rf"(?m)^##\s+{re.escape(title)}[ \t]*$")
+    matches = list(heading.finditer(body))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        fail(f"body contains duplicate '## {title}' sections")
+    start = matches[0].end()
+    next_heading = re.search(r"(?m)^##\s+", body[start:])
+    end = start + next_heading.start() if next_heading else len(body)
+    values: dict[str, str] = {}
+    for line in body[start:end].splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            fail(f"malformed metadata in '## {title}' section")
+        name, value = (part.strip() for part in line.split(":", 1))
+        if name not in required or name in values:
+            fail(f"unexpected or duplicate metadata in '## {title}' section")
+        values[name] = value
+    if set(values) != required:
+        fail(f"'## {title}' section must contain only: " + ", ".join(sorted(required)))
+    return values
+
+def contract_pointer(body: str) -> tuple[int, str, str] | None:
+    values = parse_body_metadata(body, "Implementation Contract", {"Comment ID", "SHA-256", "State"})
+    if values is None:
+        return None
+    if not values["Comment ID"].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", values["SHA-256"]) or values["State"] != "approved":
+        fail("Implementation Contract pointer is invalid")
+    return int(values["Comment ID"]), values["SHA-256"], values["State"]
+
+def repository_comment_matches(comment: dict[str, Any], repository: str, issue: int, host: str | None = None) -> bool:
+    issue_url = str(comment.get("issue_url", ""))
+    parsed = urlsplit(issue_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    if host is not None and parsed.netloc.casefold() != host.casefold():
+        return False
+    path = unquote(parsed.path).rstrip("/").casefold()
+    expected = f"/repos/{repository}/issues/{issue}".casefold()
+    return path == expected
+
+def parse_contract_comment(comment: dict[str, Any], repository: str, issue: int, host: str | None = None) -> tuple[bytes, str]:
+    if not repository_comment_matches(comment, repository, issue, host):
+        fail("contract comment belongs to a different Issue or repository")
+    body = comment.get("body")
+    if not isinstance(body, str):
+        fail("contract comment body is missing")
+    match = re.match(r"^<!-- agent-contract:v1 issue=(\d+) sha256=([0-9a-f]{64}) bytes=(\d+) -->\n\n", body)
+    if not match or int(match.group(1)) != issue:
+        fail("contract comment version header or Issue is invalid")
+    data = body[match.end():].encode("utf-8")
+    sha = validate_contract_payload(data, issue)
+    if len(data) != int(match.group(3)) or sha != match.group(2):
+        fail("contract comment byte count or SHA-256 mismatch")
+    return data, sha
+
+def atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False)
+    temp_path = Path(handle.name)
+    try:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    finally:
+        handle.close()
+    try:
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+def write_contract_mirror(base: Path, data: bytes, *, replace_stale: bool = False) -> None:
+    sha = validate_contract_payload(data, 0)
+    dest = base / "implementation-contract.md"
+    sha_path = base / "implementation-contract.sha256"
+    old_data = dest.read_bytes() if dest.is_file() else None
+    old_sha = sha_path.read_bytes() if sha_path.is_file() else None
+    if old_data is not None and hashlib.sha256(old_data).hexdigest() != sha:
+        if not replace_stale:
+            fail("immutable contract mirror already exists with different content")
+        previous_sha = hashlib.sha256(old_data).hexdigest()
+        backup = base / f"implementation-contract.{previous_sha}.bak"
+        if backup.exists() and backup.read_bytes() != old_data:
+            fail("SHA-specific contract backup conflicts with existing bytes")
+        if not backup.exists():
+            atomic_write(backup, old_data)
+    try:
+        atomic_write(dest, data)
+        atomic_write(sha_path, f"{sha}  implementation-contract.md\n".encode("utf-8"))
+    except Exception:
+        if old_data is None:
+            dest.unlink(missing_ok=True)
+        else:
+            atomic_write(dest, old_data)
+        if old_sha is None:
+            sha_path.unlink(missing_ok=True)
+        else:
+            atomic_write(sha_path, old_sha)
+        raise
+
+def update_issue_contract_pointer(repository: str, issue: int, expected: tuple[int, str, str] | None, pointer: tuple[int, str, str]) -> None:
+    endpoint = f"repos/{repository}/issues/{issue}"
+    latest = gh_api(endpoint)
+    latest_pointer = contract_pointer(str(latest.get("body", "")))
+    if latest_pointer != expected:
+        fail("Issue contract pointer changed concurrently; retry after Issue edits are serialized")
+    comment_id, sha, state = pointer
+    section = f"## Implementation Contract\n\nComment ID: {comment_id}\nSHA-256: {sha}\nState: {state}"
+    updated = replace_markdown_section(str(latest.get("body", "")), "Implementation Contract", section)
+    gh_api(endpoint, method="PATCH", payload={"body": updated})
+    readback = gh_api(endpoint)
+    if readback.get("body") != updated:
+        fail("Issue contract pointer readback differed; concurrent Issue body editing is unsupported")
+
+def comment_endpoint(repository: str, comment_id: int) -> str:
+    return f"repos/{repository}/issues/comments/{comment_id}"
+
+def contract_comment_body(issue: int, data: bytes, sha: str) -> str:
+    return f"<!-- agent-contract:v1 issue={issue} sha256={sha} bytes={len(data)} -->\n\n" + data.decode("utf-8")
+
+def fetch_contract_comment(repository: str, issue: int, pointer: tuple[int, str, str]) -> tuple[bytes, str]:
+    comment_id, expected_sha, _state = pointer
+    comment = gh_api(comment_endpoint(repository, comment_id))
+    data, sha = parse_contract_comment(comment, repository, issue)
+    if sha != expected_sha:
+        fail("Issue contract pointer SHA-256 does not match its comment")
+    return data, sha
+
+def contract_pending_path(issue: int) -> Path:
+    return STATE / str(issue) / "implementation-contract-pending.json"
+
+def cmd_publish_contract(args: argparse.Namespace) -> None:
+    require("gh")
+    repository, _host = current_repository()
+    source = Path(args.source) if args.source else STATE / str(args.issue) / "implementation-contract.md"
+    try:
+        data = source.read_bytes()
+    except OSError:
+        fail("contract source file could not be read")
+    sha = validate_contract_payload(data, args.issue)
+    comment_body = contract_comment_body(args.issue, data, sha)
+    if len(comment_body) > CONTRACT_COMMENT_MAX_CHARS:
+        fail("rendered contract comment exceeds GitHub's 65,536-character Issue-comment limit")
+    issue_endpoint = f"repos/{repository}/issues/{args.issue}"
+    issue = gh_api(issue_endpoint)
+    if int(issue.get("number", 0)) != args.issue:
+        fail("GitHub returned a different Issue")
+    old_pointer = contract_pointer(str(issue.get("body", "")))
+    if old_pointer and old_pointer[1] == sha:
+        verified, _ = fetch_contract_comment(repository, args.issue, old_pointer)
+        if verified != data:
+            fail("existing contract comment bytes differ from the requested source")
+        pending = contract_pending_path(args.issue)
+        if pending.is_file():
+            try:
+                pending_record = json.loads(pending.read_text(encoding="utf-8"))
+                pending_comment_id = int(pending_record["comment_id"])
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                fail("pending contract publication record is invalid; resolve it before continuing")
+            if (
+                pending_record.get("issue") == args.issue
+                and pending_record.get("sha256") == sha
+                and pending_comment_id == old_pointer[0]
+            ):
+                pending.unlink()
+        print(f"contract_publish=already_current comment_id={old_pointer[0]} sha256={sha}")
+        return
+    if old_pointer and not args.supersede:
+        fail("a different approved contract exists; pass --supersede to publish a new version")
+
+    comment_id: int | None = None
+    pending = contract_pending_path(args.issue)
+    if pending.is_file():
+        try:
+            record = json.loads(pending.read_text(encoding="utf-8"))
+            if record.get("sha256") != sha or record.get("issue") != args.issue:
+                fail("a different pending contract publication exists; resolve it before publishing")
+            comment_id = int(record["comment_id"])
+            pending_bytes, pending_sha = parse_contract_comment(gh_api(comment_endpoint(repository, comment_id)), repository, args.issue)
+            if pending_sha != sha or pending_bytes != data:
+                fail("pending contract comment does not match the requested source")
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            fail("pending contract publication record is invalid")
+
+    if comment_id is None:
+        created = gh_api(
+            f"repos/{repository}/issues/{args.issue}/comments",
+            method="POST",
+            payload={"body": comment_body},
+        )
+        try:
+            comment_id = int(created["id"])
+        except (TypeError, KeyError, ValueError):
+            fail("GitHub did not return the created contract comment ID")
+        atomic_write(pending, json.dumps({"issue": args.issue, "comment_id": comment_id, "sha256": sha}, sort_keys=True).encode("utf-8"))
+
+    remote_data, remote_sha = parse_contract_comment(gh_api(comment_endpoint(repository, comment_id)), repository, args.issue)
+    if remote_data != data or remote_sha != sha:
+        fail("created contract comment failed byte-for-byte verification")
+    update_issue_contract_pointer(repository, args.issue, old_pointer, (comment_id, sha, "approved"))
+    pending.unlink(missing_ok=True)
+    print(f"contract_publish=pass comment_id={comment_id} sha256={sha}")
+
+def cmd_restore_contract(args: argparse.Namespace) -> None:
+    require("gh")
+    repository, _host = current_repository()
+    issue = gh_api(f"repos/{repository}/issues/{args.issue}")
+    pointer = contract_pointer(str(issue.get("body", "")))
+    if pointer is None:
+        fail("Issue has no approved Implementation Contract pointer")
+    data, sha = fetch_contract_comment(repository, args.issue, pointer)
+    write_contract_mirror(STATE / str(args.issue), data, replace_stale=args.replace_stale)
+    print(f"contract_restore=pass sha256={sha}")
+
+def cmd_verify_contract(args: argparse.Namespace) -> None:
+    require("gh")
+    repository, _host = current_repository()
+    issue = gh_api(f"repos/{repository}/issues/{args.issue}")
+    pointer = contract_pointer(str(issue.get("body", "")))
+    if pointer is None:
+        fail("Issue has no approved Implementation Contract pointer")
+    data, sha = fetch_contract_comment(repository, args.issue, pointer)
+    mirror = STATE / str(args.issue) / "implementation-contract.md"
+    recorded = STATE / str(args.issue) / "implementation-contract.sha256"
+    if not mirror.is_file() or not recorded.is_file():
+        fail("verified remote contract has no complete local mirror; run restore-implementation-contract")
+    local_data = mirror.read_bytes()
+    local_sha = hashlib.sha256(local_data).hexdigest()
+    recorded_sha = recorded.read_text(encoding="utf-8").strip().split()[0]
+    if local_data != data or local_sha != sha or recorded_sha != sha:
+        fail("local contract mirror differs from the verified remote version")
+    print(f"contract_verify=pass comment_id={pointer[0]} sha256={sha}")
+
+def pull_endpoint(repository: str, pr: int) -> str:
+    return f"repos/{repository}/pulls/{pr}"
+
+def pull_review_pointer(body: str) -> tuple[int, str, str] | None:
+    values = parse_body_metadata(body, "Self-review", {"Comment ID", "SHA-256", "Reviewed-HEAD"})
+    if values is None:
+        return None
+    if values == {
+        "Comment ID": "<public comment ID>",
+        "SHA-256": "<64 hex characters>",
+        "Reviewed-HEAD": "<40 hex characters>",
+    }:
+        return None
+    if not values["Comment ID"].isdigit() or not re.fullmatch(r"[0-9a-f]{64}", values["SHA-256"]) or not re.fullmatch(r"[0-9a-f]{40}", values["Reviewed-HEAD"]):
+        fail("Self-review PR pointer is invalid")
+    return int(values["Comment ID"]), values["SHA-256"], values["Reviewed-HEAD"]
+
+def self_review_comment_body(issue: int, pr: int, text: str, sha: str, head: str, checklist_sha: str) -> str:
+    payload = text.encode("utf-8")
+    header = f"<!-- agent-self-review:v1 issue={issue} pr={pr} sha256={sha} head={head} checklist={checklist_sha} bytes={len(payload)} -->"
+    return header + "\n\n" + text
+
+def parse_self_review_comment(comment: dict[str, Any], repository: str, issue: int, pr: int, host: str | None = None) -> tuple[str, str, str, str]:
+    if not repository_comment_matches(comment, repository, pr, host):
+        fail("Self-review comment belongs to a different PR or repository")
+    body = comment.get("body")
+    if not isinstance(body, str):
+        fail("Self-review comment body is missing")
+    match = re.match(r"^<!-- agent-self-review:v1 issue=(\d+) pr=(\d+) sha256=([0-9a-f]{64}) head=([0-9a-f]{40}) checklist=([0-9a-f]{64}) bytes=(\d+) -->\n\n", body)
+    if not match or int(match.group(1)) != issue or int(match.group(2)) != pr:
+        fail("Self-review comment header or Issue/PR identity is invalid")
+    payload = body[match.end():].encode("utf-8")
+    sha = hashlib.sha256(payload).hexdigest()
+    if len(payload) != int(match.group(6)) or sha != match.group(3):
+        fail("Self-review comment byte count or SHA-256 mismatch")
+    return body[match.end():], sha, match.group(4), match.group(5)
+
+def validate_review_text(text: str, issue: int, entries: list[tuple[str, str, str]], fingerprint: str, expected_head: str) -> None:
+    def meta(name: str) -> str:
+        matches = [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith(name + ":")]
+        if len(matches) != 1:
+            fail(f"self-review metadata {name} missing/duplicated")
+        return matches[0]
+    if meta("Issue") != f"#{issue}" or meta("Checklist-SHA256") != fingerprint or meta("Reviewed-HEAD") != expected_head:
+        fail("public Self-review Issue, Checklist SHA, or Reviewed-HEAD is stale")
+    expected = {item_id for item_id, _source, _item in entries}
+    results: dict[str, tuple[str, str]] = {}
+    for line in text.splitlines():
+        if not line.startswith("- "):
+            continue
+        parts = [part.strip() for part in line[2:].split("|", 2)]
+        if len(parts) != 3:
+            fail("malformed Self-review result line")
+        item_id, status, detail = parts
+        if item_id in expected:
+            if item_id in results:
+                fail(f"duplicate Self-review result: {item_id}")
+            results[item_id] = (status, detail)
+    missing = expected - results.keys()
+    if missing:
+        fail("Self-review is missing checklist result(s): " + ", ".join(sorted(missing)))
+    for item_id, (status, detail) in results.items():
+        if status == "PASS" and detail.startswith("Evidence:") and detail[len("Evidence:"):].strip():
+            continue
+        if status == "N/A" and detail.startswith("Reason:") and detail[len("Reason:"):].strip():
+            continue
+        fail(f"{item_id} has incomplete or invalid Self-review result {status}")
+
+def update_pull_review_pointer(repository: str, pr: int, expected: tuple[int, str, str] | None, pointer: tuple[int, str, str]) -> None:
+    endpoint = pull_endpoint(repository, pr)
+    latest = gh_api(endpoint)
+    latest_pointer = pull_review_pointer(str(latest.get("body", "")))
+    if latest_pointer != expected:
+        fail("PR Self-review pointer changed concurrently; retry after PR body edits are serialized")
+    comment_id, sha, head = pointer
+    section = f"## Self-review\n\nComment ID: {comment_id}\nSHA-256: {sha}\nReviewed-HEAD: {head}"
+    updated = replace_markdown_section(str(latest.get("body", "")), "Self-review", section)
+    gh_api(endpoint, method="PATCH", payload={"body": updated})
+    if gh_api(endpoint).get("body") != updated:
+        fail("PR Self-review pointer readback differed; concurrent PR body editing is unsupported")
+
+def cmd_publish_self_review(args: argparse.Namespace) -> None:
+    require("git", "gh")
+    entries, fingerprint = effective_checklist(args.issue)
+    base = STATE / str(args.issue)
+    review_path = base / "self-review.md"
+    sha_path = base / "reviewer-checklist.sha256"
+    if not review_path.is_file() or not sha_path.is_file() or sha_path.read_text(encoding="utf-8").strip() != fingerprint:
+        fail("prepared self-review is missing or stale; run prepare-self-review")
+    text = review_path.read_text(encoding="utf-8")
+    current_head = run(["git", "rev-parse", "HEAD"], capture=True)
+    if run(["git", "status", "--porcelain", "--untracked-files=all"], capture=True):
+        fail("worktree is dirty; commit all changes before publishing Self-review")
+    validate_review_text(text, args.issue, entries, fingerprint, current_head)
+    repository, _host = current_repository()
+    pr = gh_api(pull_endpoint(repository, args.pr))
+    if pr.get("base", {}).get("repo", {}).get("full_name", "").casefold() != repository.casefold():
+        fail("PR base repository differs from the current repository")
+    if pr.get("state") != "open" or pr.get("head", {}).get("sha") != current_head:
+        fail("PR must be open and point at the reviewed local HEAD")
+    old_pointer = pull_review_pointer(str(pr.get("body", "")))
+    payload = text.encode("utf-8")
+    sha = hashlib.sha256(payload).hexdigest()
+    if old_pointer and old_pointer[2] == current_head and old_pointer[1] == sha:
+        remote_text, remote_sha, remote_head, remote_checklist = parse_self_review_comment(
+            gh_api(comment_endpoint(repository, old_pointer[0])), repository, args.issue, args.pr
+        )
+        if remote_text != text or remote_sha != sha or remote_head != current_head or remote_checklist != fingerprint:
+            fail("existing public Self-review does not match the requested evidence")
+        print(f"self_review_publish=already_current comment_id={old_pointer[0]} sha256={sha}")
+        return
+    header_body = self_review_comment_body(args.issue, args.pr, text, sha, current_head, fingerprint)
+    created = gh_api(f"repos/{repository}/issues/{args.pr}/comments", method="POST", payload={"body": header_body})
+    try:
+        comment_id = int(created["id"])
+    except (TypeError, KeyError, ValueError):
+        fail("GitHub did not return the Self-review comment ID")
+    remote_text, remote_sha, remote_head, remote_checklist = parse_self_review_comment(
+        gh_api(comment_endpoint(repository, comment_id)), repository, args.issue, args.pr
+    )
+    validate_review_text(remote_text, args.issue, entries, fingerprint, current_head)
+    if remote_sha != sha or remote_head != current_head or remote_checklist != fingerprint:
+        fail("published Self-review failed independent verification")
+    update_pull_review_pointer(repository, args.pr, old_pointer, (comment_id, sha, current_head))
+    print(f"self_review_publish=pass comment_id={comment_id} sha256={sha} reviewed_head={current_head}")
+
+def cmd_validate_public_review(args: argparse.Namespace) -> None:
+    require("gh")
+    entries, fingerprint = effective_checklist(args.issue)
+    repository, _host = current_repository()
+    pr = gh_api(pull_endpoint(repository, args.pr))
+    pointer = pull_review_pointer(str(pr.get("body", "")))
+    if pointer is None:
+        fail("PR has no public Self-review pointer")
+    comment = gh_api(comment_endpoint(repository, pointer[0]))
+    text, sha, head, checklist = parse_self_review_comment(comment, repository, args.issue, args.pr)
+    expected_head = args.head or str(pr.get("head", {}).get("sha", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+        fail("expected Reviewed-HEAD is invalid")
+    if pointer[1] != sha or pointer[2] != head or checklist != fingerprint or head != expected_head:
+        fail("PR pointer, public Self-review, Checklist, or requested HEAD do not match")
+    validate_review_text(text, args.issue, entries, fingerprint, expected_head)
+    print(f"public_review=pass comment_id={pointer[0]} sha256={sha} reviewed_head={head}")
+
+def pr_closes_issue(body: str, issue: int) -> bool:
+    return bool(re.search(rf"(?im)^\s*Closes\s+#{issue}\b", body))
+
+def validate_generic_rationale(issue_body: str, pr_body: str, config: dict[str, Any]) -> None:
+    _schema, components, _ids = context_profile_components(config, issue_body)
+    if not any("generic" in component.get("application_types", []) for component in components):
+        return
+    rationale = re.search(r"(?im)^Generic profile rationale:\s*(.+?)\s*$", pr_body)
+    if not rationale or len(rationale.group(1).strip()) < 12 or rationale.group(1).strip().lower() in {"todo", "tbd", "n/a", "none", "..."}:
+        fail("Generic profile rationale must explain why the affected component uses generic")
+
+def required_checks_green(repository: str, base_branch: str, head_sha: str) -> None:
+    protection = gh_api(f"repos/{repository}/branches/{quote(base_branch, safe='')}/protection/required_status_checks")
+    expected: list[tuple[str, int | None]] = []
+    for item in protection.get("checks", []) or []:
+        app_id = item.get("app_id")
+        if app_id is None or app_id == -1:
+            source = None
+        elif type(app_id) is int and app_id >= 0:
+            source = app_id
+        else:
+            fail(f"Required Check has invalid app_id for {item.get('context', '')}")
+        expected.append((str(item.get("context", "")), source))
+    for context in protection.get("contexts", []) or []:
+        expected.append((str(context), None))
+    expected = list(dict.fromkeys(expected))
+    if not expected or any(not context for context, _app in expected):
+        fail("branch protection has no valid Required Checks; delivery is fail-closed")
+    checks = gh_api(f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100")
+    statuses = gh_api(f"repos/{repository}/commits/{head_sha}/status")
+    latest_check_runs: dict[tuple[str, int | None], tuple[str, int, bool]] = {}
+    for index, item in enumerate(checks.get("check_runs", []) or []):
+        app_id = (item.get("app") or {}).get("id")
+        context = str(item.get("name", ""))
+        green = item.get("status") == "completed" and item.get("conclusion") in {"success", "skipped", "neutral"}
+        source = app_id if type(app_id) is int and app_id >= 0 else None
+        timestamp = str(item.get("started_at") or item.get("created_at") or "")
+        key = (context, source)
+        candidate = (timestamp, index, green)
+        if key not in latest_check_runs or candidate[:2] >= latest_check_runs[key][:2]:
+            latest_check_runs[key] = candidate
+    check_states: dict[tuple[str, int], bool] = {}
+    unrestricted_check_states: dict[str, list[bool]] = {}
+    for (context, source), (_timestamp, _index, green) in latest_check_runs.items():
+        if source is not None:
+            check_states[(context, source)] = green
+        unrestricted_check_states.setdefault(context, []).append(green)
+    latest_statuses: dict[str, tuple[str, int, bool]] = {}
+    for index, item in enumerate(statuses.get("statuses", []) or []):
+        context = str(item.get("context", ""))
+        timestamp = str(item.get("updated_at") or item.get("created_at") or "")
+        candidate = (timestamp, index, item.get("state") == "success")
+        if context not in latest_statuses or candidate[:2] >= latest_statuses[context][:2]:
+            latest_statuses[context] = candidate
+    status_states = {context: result for context, (_timestamp, _index, result) in latest_statuses.items()}
+    not_green: list[str] = []
+    for context, app_id in expected:
+        if app_id is None:
+            passing = any(unrestricted_check_states.get(context, [])) or status_states.get(context, False)
+        else:
+            passing = check_states.get((context, app_id), False)
+        if not passing:
+            not_green.append(context)
+    if not_green:
+        fail("Required Checks are missing, pending, or failing: " + ", ".join(not_green))
+
+def verify_pr_identity(repository: str, issue: int, pr_number: int, pr: dict[str, Any]) -> None:
+    if int(pr.get("number", 0)) != pr_number or pr.get("base", {}).get("repo", {}).get("full_name", "").casefold() != repository.casefold():
+        fail("PR does not belong to the current repository")
+    if not pr_closes_issue(str(pr.get("body", "")), issue):
+        fail(f"PR body must contain Closes #{issue}")
+
+def cmd_delivery_check(args: argparse.Namespace) -> None:
+    require("gh")
+    repository, _host = current_repository()
+    pr = gh_api(pull_endpoint(repository, args.pr))
+    verify_pr_identity(repository, args.issue, args.pr, pr)
+    issue = gh_api(f"repos/{repository}/issues/{args.issue}")
+    labels = [str(label.get("name", "")) for label in issue.get("labels", [])]
+    phase_labels = [label for label in labels if label.startswith("phase:")]
+    if args.stage == "merged":
+        if not pr.get("merged_at") or pr.get("state") != "closed":
+            fail("PR is not merged")
+        if issue.get("state") != "closed":
+            fail("Issue is not closed after merge")
+        if phase_labels:
+            fail("Issue still has phase label(s): " + ", ".join(phase_labels))
+        print("delivery_check=merged_pass")
+        return
+    if pr.get("state") != "open" or pr.get("draft"):
+        fail("handoff requires an open, non-draft PR")
+    if "phase:review" not in phase_labels:
+        fail("handoff requires Issue phase:review")
+    head_sha = str(pr.get("head", {}).get("sha", ""))
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        fail("PR HEAD SHA is invalid")
+    body = str(pr.get("body", ""))
+    verification = parse_body_metadata(body, "Verification", {"Results"})
+    untested = parse_body_metadata(body, "Untested", {"Platforms/targets"})
+    if not verification or not verification["Results"].strip() or verification["Results"].strip().lower() in {"todo", "tbd", "..."}:
+        fail("PR Verification Results must be completed")
+    if not untested or not untested["Platforms/targets"].strip() or untested["Platforms/targets"].strip().lower() in {"todo", "tbd", "..."}:
+        fail("PR Untested Platforms/targets must be completed (use 'none' when applicable)")
+    cmd_validate_public_review(argparse.Namespace(issue=args.issue, pr=args.pr, head=head_sha))
+    if extract_phase(issue) != "phase:review":
+        fail("Issue phase changed during handoff validation")
+    validate_generic_rationale(str(issue.get("body", "")), body, load_config(require_initialized=False))
+    required_checks_green(repository, str(pr.get("base", {}).get("ref", "")), head_sha)
+    print(f"delivery_check=handoff_pass head={head_sha}")
+
+def cmd_finalize_merged_issue(args: argparse.Namespace) -> None:
+    require("gh")
+    repository, _host = current_repository()
+    pr = gh_api(pull_endpoint(repository, args.pr))
+    verify_pr_identity(repository, args.issue, args.pr, pr)
+    if not pr.get("merged_at") or pr.get("state") != "closed":
+        fail("cannot finalize Issue labels before the PR is merged")
+    issue_endpoint = f"repos/{repository}/issues/{args.issue}"
+    issue = gh_api(issue_endpoint)
+    if issue.get("state") != "closed":
+        fail("cannot finalize Issue labels while the Issue remains open")
+    phase_labels = [str(label.get("name", "")) for label in issue.get("labels", []) if str(label.get("name", "")).startswith("phase:")]
+    unexpected = [label for label in phase_labels if label != "phase:review"]
+    if unexpected:
+        fail("cannot finalize Issue labels with unexpected phase label(s): " + ", ".join(unexpected))
+    if "phase:review" in phase_labels:
+        gh_api(f"{issue_endpoint}/labels/{quote('phase:review', safe='')}", method="DELETE")
+    remaining = gh_api(issue_endpoint)
+    if any(str(label.get("name", "")).startswith("phase:") for label in remaining.get("labels", [])):
+        fail("phase label cleanup readback failed")
+    print(f"merged_issue_finalized=pass removed={len(phase_labels)}")
 
 def cmd_checkpoint(args: argparse.Namespace) -> None:
     require("git", "gh")
@@ -956,7 +1711,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
     branch = run(["git", "branch", "--show-current"], capture=True)
     head = run(["git", "rev-parse", "HEAD"], capture=True)
     status = run(["git", "status", "--porcelain"], capture=True)
-    issue = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "labels"], capture=True))
+    issue = json.loads(run(["gh", "issue", "view", str(args.issue), "--json", "labels,state"], capture=True))
     phase = extract_phase(issue)
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     body = ""
@@ -1004,13 +1759,13 @@ def cmd_checkpoint(args: argparse.Namespace) -> None:
         "---\n\n"
     )
     path.write_text(front + body.lstrip(), encoding="utf-8")
-    print(path.relative_to(ROOT))
+    print(repo_relative(path))
 
 def cmd_resume(args: argparse.Namespace) -> None:
     require("git", "gh")
     path = STATE / str(args.issue) / "checkpoint.md"
     if not path.exists():
-        fail(f"checkpoint not found: {path.relative_to(ROOT)}")
+        fail(f"checkpoint not found: {repo_relative(path)}")
     print(path.read_text(encoding="utf-8").rstrip())
     print("\n--- CURRENT CONTEXT ---")
     cmd_context(args)
@@ -1049,7 +1804,7 @@ def parse_document_schema(text: str, path: Path) -> tuple[int, list[str]]:
         for line_number, line in enumerate(body.splitlines(), start=1)
         if DOCUMENTATION_SCHEMA_MARKER in line
     ]
-    label = str(path.relative_to(ROOT))
+    label = repo_relative(path)
     if not matches:
         return 1, []
     if len(matches) > 1:
@@ -1111,7 +1866,7 @@ def validate_markdown_links(path: Path, text: str) -> list[str]:
     for target in markdown_link_targets(text):
         resolved = local_markdown_target(path, target)
         if resolved is not None and not resolved.is_file():
-            errors.append(f"{path.relative_to(ROOT)}: broken local Markdown link '{target}'")
+            errors.append(f"{repo_relative(path)}: broken local Markdown link '{target}'")
     return errors
 
 
@@ -1121,14 +1876,14 @@ def validate_doc(path: Path, doc_type: str, required_schema: int = 1) -> list[st
     schema, schema_errors = parse_document_schema(text, path)
     errors.extend(schema_errors)
     if required_schema == 2 and schema != 2:
-        errors.append(f"{path.relative_to(ROOT)}: requires {DOCUMENTATION_SCHEMA_2_MARKER}")
+        errors.append(f"{repo_relative(path)}: requires {DOCUMENTATION_SCHEMA_2_MARKER}")
     if doc_type == "specification":
         required = SPEC_REQUIRED_V2 if schema == 2 else SPEC_REQUIRED_V1
     else:
         required = DESIGN_REQUIRED_V2 if schema == 2 else DESIGN_REQUIRED_V1
     headings = markdown_headings(text)
     errors.extend(
-        f"{path.relative_to(ROOT)}: missing section '## {heading}'"
+        f"{repo_relative(path)}: missing section '## {heading}'"
         for heading in required if heading not in headings
     )
     if schema == 2:
@@ -1139,7 +1894,7 @@ def validate_doc(path: Path, doc_type: str, required_schema: int = 1) -> list[st
 def documentation_warnings(path: Path, text: str, doc_type: str, schema: int) -> list[str]:
     if schema != 2:
         return []
-    label = str(path.relative_to(ROOT))
+    label = repo_relative(path)
     warnings: list[str] = []
     if len(text.encode("utf-8")) > DOCUMENTATION_SIZE_WARNING_BYTES:
         warnings.append(
@@ -1156,7 +1911,7 @@ def documentation_warnings(path: Path, text: str, doc_type: str, schema: int) ->
         if linked:
             break
     if not linked:
-        warnings.append(f"{label}: add a link from a README ownership index under {base.relative_to(ROOT)}")
+        warnings.append(f"{label}: add a link from a README ownership index under {repo_relative(base)}")
     return warnings
 
 def cmd_validate_docs(args: argparse.Namespace) -> None:
@@ -1176,7 +1931,7 @@ def cmd_validate_docs(args: argparse.Namespace) -> None:
                 continue
             text = path.read_text(encoding="utf-8")
             if marker not in text:
-                errors.append(f"{path.relative_to(ROOT)}: missing required marker {marker}")
+                errors.append(f"{repo_relative(path)}: missing required marker {marker}")
                 continue
             checked += 1
             doc_errors = validate_doc(path, typ, required_schema)
@@ -1210,7 +1965,7 @@ def cmd_new_doc(args: argparse.Namespace) -> None:
     parts = slug.split("/")[:-1] + [leaf + ".md"]
     dest = ROOT / dest_dir_rel / Path(*parts)
     if dest.exists():
-        fail(f"document already exists: {dest.relative_to(ROOT)}")
+        fail(f"document already exists: {repo_relative(dest)}")
     template = (ROOT / template_rel).read_text(encoding="utf-8")
     title = (args.title or slug.split("/")[-1]).replace("-", " ").replace("_", " ").strip().title()
     template = template.replace(title_token, title)
@@ -1218,7 +1973,7 @@ def cmd_new_doc(args: argparse.Namespace) -> None:
         template = template.replace("#<issue>", f"#{args.issue}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(template, encoding="utf-8")
-    print(dest.relative_to(ROOT))
+    print(repo_relative(dest))
 
 
 TEMPLATE_STATE = ROOT / ".agent" / "template-state.json"
@@ -1256,7 +2011,7 @@ def documentation_migrations(required_schema: int) -> list[str]:
             text = path.read_text(encoding="utf-8")
             schema, schema_errors = parse_document_schema(text, path)
             if not schema_errors and schema < required_schema:
-                migrations.append(str(path.relative_to(ROOT)))
+                migrations.append(repo_relative(path))
     return sorted(set(migrations))
 
 
@@ -1381,13 +2136,16 @@ def cmd_refresh_template_manifest(args: argparse.Namespace) -> None:
     candidates = [
         "AGENTS.md", "CLAUDE.md", "GEMINI.md", "README.AGENTS_WORKFLOW.md",
         ".agent/README.md", ".agent/template-files.json",
-        ".github/ISSUE_TEMPLATE/feature.yml", ".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/config.yml", ".github/pull_request_template.md",
+        ".github/ISSUE_TEMPLATE/feature.yml", ".github/ISSUE_TEMPLATE/bug.yml", ".github/ISSUE_TEMPLATE/config.yml", ".github/pull_request_template.md", ".github/workflows/template-ci.yml",
     ]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "agent-workflow").glob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "standards").rglob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "docs" / "templates").glob("*.md")]
-    candidates += [str(p.relative_to(ROOT)) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
-    candidates += ["docs/specs/agent-tooling-spec.md", "docs/specs/project-profile-spec.md"]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "agent-workflow").glob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "standards").rglob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "docs" / "templates").glob("*.md")]
+    candidates += [repo_relative(p) for p in (ROOT / "scripts" / "agent").glob("*") if p.is_file()]
+    candidates += [
+        "docs/specs/agent-tooling-spec.md", "docs/specs/project-profile-spec.md",
+        "docs/specs/agent-workflow-assurance-spec.md", "docs/design/agent-workflow-assurance-design.md",
+    ]
     # Presentation is included as template documentation, but project teams may replace it intentionally.
     candidates += ["docs/presentations/README.md", "docs/presentations/ai-agent-project-template-introduction.pptx"]
     for rel in sorted(set(candidates)):
@@ -1420,7 +2178,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("run-hook")
     s.add_argument("name")
-    s.add_argument("--component", action="append", default=[], help="component id; repeat to select multiple components")
+    selection = s.add_mutually_exclusive_group()
+    selection.add_argument("--component", action="append", default=[], help="component id; repeat to select multiple components")
+    selection.add_argument("--issue", type=int, help="select affected components from an Issue (verify_quick only)")
+    s.add_argument("--capability", action="append", default=[], help="explicit target capability; repeat to select multiple")
     s.set_defaults(func=cmd_run_hook)
 
     s = sub.add_parser("start-feature-branch")
@@ -1445,6 +2206,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("path", nargs="?")
     s.set_defaults(func=cmd_save_contract)
 
+    s = sub.add_parser("publish-implementation-contract")
+    s.add_argument("issue", type=int)
+    s.add_argument("--source")
+    s.add_argument("--supersede", action="store_true")
+    s.set_defaults(func=cmd_publish_contract)
+
+    s = sub.add_parser("restore-implementation-contract")
+    s.add_argument("issue", type=int)
+    s.add_argument("--replace-stale", action="store_true")
+    s.set_defaults(func=cmd_restore_contract)
+
+    s = sub.add_parser("verify-implementation-contract")
+    s.add_argument("issue", type=int)
+    s.set_defaults(func=cmd_verify_contract)
+
     s = sub.add_parser("prepare-self-review")
     s.add_argument("issue", type=int)
     s.set_defaults(func=cmd_prepare_review)
@@ -1452,6 +2228,28 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("validate-self-review")
     s.add_argument("issue", type=int)
     s.set_defaults(func=cmd_validate_review)
+
+    s = sub.add_parser("publish-self-review")
+    s.add_argument("issue", type=int)
+    s.add_argument("--pr", type=int, required=True)
+    s.set_defaults(func=cmd_publish_self_review)
+
+    s = sub.add_parser("validate-public-review")
+    s.add_argument("issue", type=int)
+    s.add_argument("--pr", type=int, required=True)
+    s.add_argument("--head")
+    s.set_defaults(func=cmd_validate_public_review)
+
+    s = sub.add_parser("delivery-check")
+    s.add_argument("issue", type=int)
+    s.add_argument("--pr", type=int, required=True)
+    s.add_argument("--stage", choices=["handoff", "merged"], required=True)
+    s.set_defaults(func=cmd_delivery_check)
+
+    s = sub.add_parser("finalize-merged-issue")
+    s.add_argument("issue", type=int)
+    s.add_argument("--pr", type=int, required=True)
+    s.set_defaults(func=cmd_finalize_merged_issue)
 
     s = sub.add_parser("save-work-checkpoint")
     s.add_argument("issue", type=int)
@@ -1475,7 +2273,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_update_template)
 
     s = sub.add_parser("refresh-template-manifest")
-    s.add_argument("--version", default="0.5.0")
+    s.add_argument("--version", default="0.6.0")
     s.set_defaults(func=cmd_refresh_template_manifest)
 
     s = sub.add_parser("validate-docs")

@@ -8,6 +8,8 @@
 
 ## Overview
 
+The separate contract distribution, public self-review, handoff, and merge-assurance CLI contract is owned by the [Agent Workflow Assurance Specification](agent-workflow-assurance-spec.md).
+
 This specification defines the stable command-line behavior used to validate durable documentation and update projects from the template. It gives maintainers and agents predictable validation results, migration reports, and file-preservation guarantees. The [documentation synchronization standard](../standards/documentation-sync.md) defines document authority; the [template update standard](../standards/template-update.md) explains the workflow around these commands.
 
 ## Purpose
@@ -118,7 +120,7 @@ The contract applies to supported repository environments using the provided pla
 
 ## Compatibility and versioning
 
-Schema 1 remains supported when the source manifest omits `documentation_schema_version` or explicitly requires 1. A schema-1 document remains valid when schema 1 is required; schema-2 documents may be used with either minimum. A schema-2 requirement makes schema-1 documents migration-required and causes `validate-docs` to report them as invalid until manually updated. No automatic content migration is provided. The current template version is 0.5.0; this metadata does not change the document migration rules.
+Schema 1 remains supported when the source manifest omits `documentation_schema_version` or explicitly requires 1. A schema-1 document remains valid when schema 1 is required; schema-2 documents may be used with either minimum. A schema-2 requirement makes schema-1 documents migration-required and causes `validate-docs` to report them as invalid until manually updated. No automatic content migration is provided. The current template version is 0.6.0; this metadata does not change the document migration rules.
 
 ## Acceptance traceability
 

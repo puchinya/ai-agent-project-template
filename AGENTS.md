@@ -79,7 +79,7 @@ New durable documents should start from `docs/templates/`.
 Repository-changing work has two modes:
 
 - **Direct request**: requirements -> design -> implementation -> review.
-- **Supplied Implementation Contract**: compressed decision-complete handoff, not a workflow bypass. Associate it with the owning Issue and save an exact local mirror using `save-implementation-contract.*`.
+- **Supplied Implementation Contract**: compressed decision-complete handoff, not a workflow bypass. Associate it with the owning Issue, save the exact local bytes using `save-implementation-contract.*`, then publish/restore/verify through the matching contract commands when the Issue pointer is available. Keep the approved source in one top-level Issue comment; never copy its full text into the Issue body.
 
 Approved repository specs/design/Issue decisions override a conflicting contract.
 
@@ -96,6 +96,10 @@ Keep an Issue-scoped working set in this order:
 7. current relevant diff.
 
 Use `scripts/agent/agent-context.* <issue>` to produce a compact routing manifest. Read only the selected application profiles and linked owners; do not load every standard, specification, design, or application profile by default. The manifest routes readers and does not replace the linked documents.
+
+`agent-context` may print `document_owner` and `planned_owner` paths from the Issue's `## Document impact`. Only direct Markdown files under `docs/specs/`, `docs/design/`, and `docs/status/` in the same repository are accepted; ambiguous or foreign links are diagnostics. It never fetches contract comments or expands their text.
+
+Closed Issues report `phase=closed` from Issue state with no active workflow path, even if a stale phase label remains.
 
 Prefer bounded search/ranges/diffs. Do not scan all docs, repeatedly reread unchanged large files, or paste full logs into active context. Put retained raw logs under `.agent-state/issues/<issue>/logs/`.
 
@@ -118,7 +122,7 @@ scripts/agent/run-hook.* verify_quick
 scripts/agent/run-hook.* verify_final
 ```
 
-Schema-2 profiles run project, selected component, and compatible target hooks in that order. Repeat `--component <id>` to limit a verification hook to specific components; without it, all components are selected. Schema-1 profiles keep their existing hook behavior.
+Schema-2 profiles run project, selected component, and compatible target hooks in that order. Repeat `--component <id>` to limit a verification hook to specific components; without it, all components are selected. `verify_quick --issue <number>` derives components only from that Issue's `## Affected components` and cannot be combined with `--component`. `verify_final` defaults to every component. Optional target requirements gate by OS, architecture, installed tools, then explicitly supplied `--capability` values; skips do not run hooks and remain unverified. Schema-1 profiles keep their existing hook behavior.
 
 Do not silently replace configured hooks with ad-hoc alternatives.
 
@@ -132,6 +136,7 @@ Before PR delivery:
 - `scripts/agent/validate-docs.*` passes;
 - acceptance criteria are satisfied or explicitly blocked;
 - the effective Reviewer Checklist has item-level results against the committed HEAD.
+- for a generic affected component, the PR has a concrete `Generic profile rationale`.
 
 ## Delivery gate
 
@@ -143,10 +148,14 @@ Before implementation-phase completion is reported:
 - `validate-self-review.* <issue>` passes;
 - branch is pushed;
 - PR exists and contains `Closes #<issue>`;
+- the public Self-review comment and PR pointer validate against the exact Checklist and HEAD;
+- `delivery-check.* <issue> --pr <pr> --stage handoff` confirms Required Checks are configured and green;
 - Issue is in `phase:review`;
 - `docs/agent-workflow/review.md` has been entered.
 
-Overall Issue completion remains merge-gated.
+Create the PR as Draft, move the Issue to `phase:review`, publish the validated Self-review, then mark the PR ready after the PR body is complete. Overall Issue completion remains merge-gated. After merge and Issue closure, use `finalize-merged-issue.*`; it removes only stale `phase:review`, fails without mutation if another `phase:*` label remains, and is idempotent after cleanup.
+
+Hooks are arbitrary shell commands configured in the trusted `.agent/project.json`. They are not sandboxed. CI must validate PR metadata and project-independent template fixtures in read-only jobs; never run PR-supplied hooks with secrets or write permissions.
 
 ## Communication
 

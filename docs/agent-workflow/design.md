@@ -58,6 +58,10 @@ Checklist items cover risks that acceptance criteria alone do not make safe to i
 
 A material requirement discovered later is not silently added during implementation; return to requirements/design.
 
+## Target and assurance design topics
+
+For schema-2 targets, specify optional `requirements.architectures`, `requirements.tools`, and `requirements.capabilities` separately from `runnable_on`. Define host/architecture/tool/capability skip behavior and which capabilities must be explicitly supplied. Do not infer application type from stack or host. For contract publication, review evidence, and CI trust boundaries, route to the dedicated [assurance design](../design/agent-workflow-assurance-design.md) and [assurance specification](../specs/agent-workflow-assurance-spec.md) rather than duplicating their protocols here.
+
 ## Approval gate
 
 Do not begin nontrivial implementation until requirements, required specs/design, and the Reviewer Checklist are approved by the user or responsible maintainer.

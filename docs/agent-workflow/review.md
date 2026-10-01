@@ -18,6 +18,8 @@ Run `agent-context.* <issue>` to identify the affected components and selected c
 Closes #<issue>
 ```
 
+Keep the PR body limited to the review summary and machine-checked fields. The `## Self-review` block contains only the public comment ID, SHA-256, and Reviewed-HEAD; the full checklist results live in one top-level PR conversation comment. Complete `## Verification` and `## Untested` before handoff. If an affected component uses `generic`, give a concrete reason under `## Generic profile rationale`.
+
 Do not duplicate the full Issue/spec/design/Implementation Contract.
 
 ## Documentation review
@@ -55,4 +57,6 @@ After repository-changing remediation:
 
 Work is complete only when required reviews/checks pass, acceptance criteria are satisfied, required docs are synchronized, and the PR is merged.
 
-Verify Issue closure after merge.
+Verify Issue closure after merge, then run `finalize-merged-issue.* <issue> --pr <pr>` to remove only stale `phase:review`. Unexpected `phase:*` labels fail closed without mutation. Repeating the command after review-phase removal succeeds without mutation.
+
+Before requesting handoff, run `validate-public-review.* <issue> --pr <pr>` and `delivery-check.* <issue> --pr <pr> --stage handoff`. Reviewers independently inspect the diff, evidence, and Required Checks; self-review evidence is a navigation aid, not proof of test truth.

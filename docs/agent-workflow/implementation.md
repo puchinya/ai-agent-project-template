@@ -9,7 +9,7 @@ Before editing:
 1. Re-read the approved Issue and confirm no newer decision supersedes it.
 2. Run `agent-context.* <issue>` to identify affected components and conditional application profiles.
 3. Read only the linked relevant specification/design/status owners routed for this work.
-4. If an Implementation Contract was supplied, save and verify its exact local mirror.
+4. If an Implementation Contract was supplied, save its exact bytes, then verify or restore its approved Issue comment pointer. Use `publish-implementation-contract.*` only after the Issue and contract approval gates; use `restore-implementation-contract.* --replace-stale` only for an intentional local version change.
 5. Run `prepare-self-review.* <issue>`.
 6. For source changes, run `start-feature-branch.* <issue> <short-description>`.
 7. Replace `phase:ready` with `phase:implementation`.
@@ -31,6 +31,8 @@ During iteration, run the configured `verify_quick` hook from the [project profi
 ```text
 run-hook.* verify_quick
 ```
+
+When an Issue has `## Affected components`, prefer `run-hook.* verify_quick --issue <issue>` so only those component hooks run. `verify_final` defaults to all components. Use `--capability <id>` only when the target capability is explicitly available; a skipped target was not verified.
 
 When stable, run the configured `verify_final` hook and [document validation](../../scripts/agent/README.md):
 
@@ -56,6 +58,8 @@ After repository-controlled changes are stable:
 
 Any new commit makes the prior self-review stale.
 
+After the local validator passes and the commit is pushed, open/update a Draft PR with `Closes #<issue>`, verification, untested platforms/targets, and a Generic profile rationale when an affected component is `generic`. Publish the self-review through `publish-self-review.* <issue> --pr <pr>`; that command re-fetches the single comment by ID and verifies its Checklist and HEAD before updating the PR pointer.
+
 ## Delivery gate
 
 Before reporting implementation complete:
@@ -65,7 +69,7 @@ Before reporting implementation complete:
 - docs validation passed;
 - self-review validation passed;
 - branch pushed;
-- PR exists with `Closes #<issue>`;
+- Draft PR exists with `Closes #<issue>` and complete Verification/Untested fields;
 - Issue moved to `phase:review`.
 
-Then enter the [review workflow](review.md).
+Publish the public Self-review, mark the PR ready, wait for Required Checks, and run `delivery-check.* <issue> --pr <pr> --stage handoff`. This gate fails if checks are unconfigured, pending, or failing. Then enter the [review workflow](review.md).

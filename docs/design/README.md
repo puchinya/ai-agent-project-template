@@ -6,11 +6,12 @@ Start new documents from the [design template](../templates/design-template.md) 
 
 ## Ownership map
 
-There are no durable designs in this starter scaffold yet. Add one row for each approved architecture area when its owner document exists.
+The ownership map below lists the current durable designs. Add one row for each approved architecture area when its owner document exists.
 
 | Architecture area | Owner |
 |---|---|
 | Project profile validation, context routing, runtime host, and hook composition | [Project Profile and Context Design](project-profile-context-design.md) |
+| Contract distribution, self-review, delivery checks, and CI trust boundaries | [Agent Workflow Assurance Design](agent-workflow-assurance-design.md) |
 
 For large projects, add nested README indexes under category directories and link those categories here. Every navigation link must be meaningful and clickable.
 

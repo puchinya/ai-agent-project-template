@@ -32,7 +32,8 @@ def document(doc_type, schema=1, *, omit=None, extra=""):
 def write_doc(root, relative, content):
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    with path.open("w", encoding="utf-8", newline="") as output:
+        output.write(content)
     return path
 
 
@@ -136,7 +137,7 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertEqual(module.documentation_migrations(2), [])
         code, _, stderr = self.capture_exit(lambda: module.cmd_validate_docs(Namespace()))
         self.assertEqual(code, 1)
-        self.assertIn(f"{path.relative_to(self.root)}: missing section '## Purpose'", stderr)
+        self.assertIn(f"{path.relative_to(self.root).as_posix()}: missing section '## Purpose'", stderr)
 
     def test_schema2_broken_link_is_not_migration_and_fails_validate_docs(self):
         self.set_manifest(2)
@@ -157,8 +158,8 @@ class DocumentationSchemaTests(unittest.TestCase):
             self.root, "docs/design/legacy-design.md", document("design", None)
         )
         self.assertEqual(module.documentation_migrations(2), [
-            str(missing_marker.relative_to(self.root)),
-            str(explicit_schema.relative_to(self.root)),
+            missing_marker.relative_to(self.root).as_posix(),
+            explicit_schema.relative_to(self.root).as_posix(),
         ])
 
     def test_invalid_schema_markers_are_not_migrations_and_fail_validate_docs(self):
@@ -277,15 +278,18 @@ class DocumentationSchemaTests(unittest.TestCase):
         self.assertFalse(set(module.SPEC_REQUIRED_V2) - module.markdown_headings(spec_text))
         self.assertFalse(set(module.DESIGN_REQUIRED_V2) - module.markdown_headings(design_text))
 
-    def test_manifest_refresh_defaults_to_050_and_schema2(self):
+    def test_manifest_refresh_defaults_to_060_and_schema2(self):
         for directory in (
             "docs/agent-workflow", "docs/standards", "docs/templates", "docs/specs",
-            "docs/design", "scripts/agent", ".agent",
+            "docs/design", "scripts/agent", ".agent", ".github/workflows",
         ):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
         (self.root / "docs/standards/application-profiles").mkdir(parents=True, exist_ok=True)
         write_doc(self.root, "docs/specs/agent-tooling-spec.md", "shared contract\n")
         write_doc(self.root, "docs/specs/project-profile-spec.md", "shared profile contract\n")
+        write_doc(self.root, "docs/specs/agent-workflow-assurance-spec.md", "shared assurance contract\n")
+        write_doc(self.root, "docs/design/agent-workflow-assurance-design.md", "shared assurance design\n")
+        write_doc(self.root, ".github/workflows/template-ci.yml", "name: Template CI\n")
         write_doc(self.root, "docs/specs/product-feature-spec.md", "project spec\n")
         write_doc(self.root, "docs/design/product-feature-design.md", "project design\n")
         write_doc(self.root, "docs/standards/application-profiles/desktop-gui.md", "conditional standard\n")
@@ -294,10 +298,13 @@ class DocumentationSchemaTests(unittest.TestCase):
         args = Namespace(version=module.build_parser().parse_args(["refresh-template-manifest"]).version)
         module.cmd_refresh_template_manifest(args)
         data = json.loads(module.TEMPLATE_FILES.read_text(encoding="utf-8"))
-        self.assertEqual(data["template_version"], "0.5.0")
+        self.assertEqual(data["template_version"], "0.6.0")
         self.assertEqual(data["documentation_schema_version"], 2)
         self.assertIn("docs/specs/agent-tooling-spec.md", data["files"])
         self.assertIn("docs/specs/project-profile-spec.md", data["files"])
+        self.assertIn("docs/specs/agent-workflow-assurance-spec.md", data["files"])
+        self.assertIn("docs/design/agent-workflow-assurance-design.md", data["files"])
+        self.assertIn(".github/workflows/template-ci.yml", data["files"])
         self.assertIn("docs/standards/application-profiles/desktop-gui.md", data["files"])
         self.assertNotIn("docs/specs/product-feature-spec.md", data["files"])
         self.assertNotIn("docs/design/product-feature-design.md", data["files"])
@@ -372,6 +379,20 @@ class DocumentationSchemaTests(unittest.TestCase):
             "project_design": project_design.encode("utf-8"),
         }
 
+    def test_update_check_preserves_project_specific_documents_and_writes_nothing(self):
+        fixture = self.shared_spec_update_fixture()
+        state_before = fixture["state"].read_bytes()
+        project_spec_before = fixture["project_spec_path"].read_bytes()
+        project_design_before = fixture["project_design_path"].read_bytes()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.run_update(fixture["source"], fixture["destination"], fixture["state"], check=True)
+        self.assertFalse((fixture["destination"] / fixture["shared_path"]).exists())
+        self.assertFalse((fixture["destination"] / fixture["standard_path"]).exists())
+        self.assertEqual(fixture["state"].read_bytes(), state_before)
+        self.assertEqual(fixture["project_spec_path"].read_bytes(), project_spec_before)
+        self.assertEqual(fixture["project_design_path"].read_bytes(), project_design_before)
+
     def test_update_copies_shared_spec_and_preserves_project_specific_documents(self):
         fixture = self.shared_spec_update_fixture()
         stdout = io.StringIO()
@@ -405,8 +426,21 @@ class DocumentationSchemaTests(unittest.TestCase):
             module.cmd_update_template(args)
             shared_spec = destination / "docs/specs/project-profile-spec.md"
             design = destination / "docs/design/project-profile-context-design.md"
+            assurance_spec = destination / "docs/specs/agent-workflow-assurance-spec.md"
+            assurance_design = destination / "docs/design/agent-workflow-assurance-design.md"
+            status = destination / "docs/status/agent-workflow-assurance-status.md"
+            workflow = destination / ".github/workflows/template-ci.yml"
+            contract_wrapper = destination / "scripts/agent/publish-implementation-contract.sh"
+            pr_template = destination / ".github/pull_request_template.md"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertTrue(shared_spec.is_file())
+            self.assertTrue(assurance_spec.is_file())
+            self.assertTrue(assurance_design.is_file())
+            self.assertTrue(workflow.is_file())
+            self.assertTrue(contract_wrapper.is_file())
+            self.assertTrue(pr_template.is_file())
+            self.assertNotIn("docs/status/agent-workflow-assurance-status.md", manifest["files"])
+            self.assertFalse(status.exists())
             self.assertNotIn("docs/design/project-profile-context-design.md", manifest["files"])
             self.assertFalse(design.exists())
             module.cmd_validate_docs(Namespace())

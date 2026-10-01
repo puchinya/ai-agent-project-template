@@ -9,6 +9,7 @@ Start new documents from the [specification template](../templates/spec-template
 | Semantic area | Owner |
 |---|---|
 | Agent documentation validation and template-update CLI behavior | [Agent Tooling Specification](agent-tooling-spec.md) |
+| Issue contract distribution, PR self-review, delivery, and workflow CI assurance | [Agent Workflow Assurance Specification](agent-workflow-assurance-spec.md) |
 | Project profile schemas, initialization, hook selection, and agent context routing | [Project Profile and Agent Context Specification](project-profile-spec.md) |
 
 The fenced example shows link syntax only; replace it with a link to an existing owner before using it:
