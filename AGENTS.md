@@ -31,6 +31,31 @@ Research-only work does not require an Issue unless requested. If research becom
 
 Use `gh` for GitHub operations and `git` for local branch/staging/commit/push operations.
 
+## Sandbox-aware Git/GitHub execution
+
+Classify each command by its underlying operations before running it. Use the runtime's narrow host/elevated path for operations that need GitHub access, network access, credentials, or Git metadata writes. Keep sandbox-safe work in the sandbox; do not classify every `git` or shell command as privileged.
+
+### Sandbox-safe work
+
+- Normal permitted file, build, and test work.
+- Local read-only Git operations that need no network, credentials, or Git metadata mutation, such as `diff`, `log`, `show`, `rev-parse`, `branch --show-current`, and `show-ref`.
+- For status, prefer `git --no-optional-locks status --short` or set `GIT_OPTIONAL_LOCKS=0`.
+
+### Host/elevated work
+
+Request the runtime's narrow host/elevated path **before the first attempt** for:
+
+1. Every `gh` command, including reads and `gh auth status`.
+2. Git metadata mutations: `add`, `commit`, branch create/delete, `switch`, `checkout`, `reset`, `stash`, `merge`, `rebase`, `cherry-pick`, `tag`, and worktree mutation.
+3. Git remote, network, or credential operations: `fetch`, `pull`, `push`, `ls-remote`, and remote submodule operations.
+4. Any helper or wrapper that invokes one of those operations.
+
+Examples that need host/elevated execution because of their internals include `setup-github.*`, `start-feature-branch.*`, `ensure-version-milestone.*`, `agent-context.*`, `run-hook.* verify_quick --issue N`, contract GitHub helpers, public-review helpers, delivery checks, and merge-finalization helpers. This list is illustrative; classify by the operations a helper performs.
+
+Never run a predictably privileged command in the sandbox just to let it fail and retry. Keep sandbox-safe and host/elevated commands separate; split mixed commands such as `git status && gh issue view 123`. Reuse an approval only when it is available, and request the narrowest useful scope.
+
+If host/elevated execution is unavailable or denied, report the exact command and error. Do not disable the sandbox, use `danger-full-access`, copy credentials, or weaken global security unless explicitly requested.
+
 For multiline GitHub Markdown, use a body file when the command supports it. Never encode intended line breaks as literal `\n`.
 
 ## Workflow routing

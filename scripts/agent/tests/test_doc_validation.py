@@ -425,6 +425,7 @@ class DocumentationSchemaTests(unittest.TestCase):
         with patch.object(module, "ROOT", destination), patch.object(module, "TEMPLATE_STATE", state_path), patch.object(module, "TEMPLATE_FILES", manifest_path), contextlib.redirect_stdout(stdout):
             module.cmd_update_template(args)
             shared_spec = destination / "docs/specs/project-profile-spec.md"
+            agents = destination / "AGENTS.md"
             design = destination / "docs/design/project-profile-context-design.md"
             assurance_spec = destination / "docs/specs/agent-workflow-assurance-spec.md"
             assurance_design = destination / "docs/design/agent-workflow-assurance-design.md"
@@ -433,6 +434,12 @@ class DocumentationSchemaTests(unittest.TestCase):
             contract_wrapper = destination / "scripts/agent/publish-implementation-contract.sh"
             pr_template = destination / ".github/pull_request_template.md"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertTrue(agents.is_file())
+            agents_text = agents.read_text(encoding="utf-8")
+            self.assertIn("## Sandbox-aware Git/GitHub execution", agents_text)
+            self.assertIn("Every `gh` command", agents_text)
+            self.assertIn("Local read-only Git", agents_text)
+            self.assertIn("git --no-optional-locks status --short", agents_text)
             self.assertTrue(shared_spec.is_file())
             self.assertTrue(assurance_spec.is_file())
             self.assertTrue(assurance_design.is_file())

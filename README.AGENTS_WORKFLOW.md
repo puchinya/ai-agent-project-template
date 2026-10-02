@@ -68,6 +68,10 @@ gh auth login
 
 組織ポリシー、branch protection、required checks、GitHub Appの権限制限がある場合は、それらが優先されます。テンプレートは保護ルールを回避しません。
 
+### Sandbox制限下でのGit/GitHub実行
+
+Codexのような制限付きsandboxでは、GitHub CLI (`gh`) の全操作、`.git` を変更するGit操作、remote・network・credentialを使うGit操作に、最初からruntimeのhost/elevated実行経路を指定します。ローカルのread-only Git操作はsandbox内で実行できます。詳しい分類とhelperの扱いは [`AGENTS.md`](AGENTS.md) を参照してください。
+
 ### 技術スタック別の追加要件
 
 `init-project` は利用技術を検出して初期hookを生成しますが、実際のbuild/testにはその技術のSDK・package managerが必要です。

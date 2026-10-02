@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template_id": "ai-agent-project-template",
-  "template_version": "0.6.0",
+  "template_version": "0.6.1",
   "documentation_schema_version": 2,
   "files": [
     ".agent/README.md",
