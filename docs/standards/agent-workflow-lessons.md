@@ -66,4 +66,8 @@ Progressive disclosure starts with a concise Overview of the consumer or archite
 
 A newer template can raise the required documentation schema. The updater reports which project-specific documents need semantic migration, while preserving them for review. The migration belongs to the same downstream template-update Issue/PR; it is not a blind rewrite command.
 
+## Classify commands before sandbox execution
+
+Predictable sandbox-first attempts for `gh` and Git writes waste retries and tokens. Classify commands by their underlying operations before execution, keep safe local reads sandboxed, and use the narrowest host/elevated path needed for privileged operations.
+
 See the [specification standard](specification.md), [design standard](design.md), [documentation synchronization standard](documentation-sync.md), and [template update standard](template-update.md).
